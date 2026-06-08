@@ -79,6 +79,7 @@ class RequestCache:
             self.cache[request_id] = {
                 "id": request_id,
                 "timestamp": self._current_timestamp(),
+                "client_ip": data.get("client_ip"),
                 "request_headers": data.get("request_headers"),
                 "original_request_body": data.get("original_request_body"),
                 "request_body": data.get("request_body"),
@@ -114,6 +115,8 @@ class RequestCache:
             if request_id in self.cache:
                 # Update existing entry
                 entry = self.cache[request_id]
+                if "client_ip" in data:
+                    entry["client_ip"] = data.get("client_ip")
                 if "request_headers" in data:
                     entry["request_headers"] = data.get("request_headers")
                 if "original_request_body" in data:
@@ -139,6 +142,7 @@ class RequestCache:
                 self.cache[request_id] = {
                     "id": request_id,
                     "timestamp": self._current_timestamp(),
+                    "client_ip": data.get("client_ip"),
                     "request_headers": data.get("request_headers"),
                     "original_request_body": data.get("original_request_body"),
                     "request_body": data.get("request_body"),
@@ -320,6 +324,7 @@ class RequestCache:
             self.cache[request_id] = {
                 "id": request_id,
                 "timestamp": self._normalize_import_timestamp(data.get("timestamp")),
+                "client_ip": data.get("client_ip"),
                 "request_headers": data.get("request_headers"),
                 "original_request_body": data.get("original_request_body"),
                 "request_body": data.get("request_body"),
