@@ -69,6 +69,66 @@ def apply_effort_policy(payload: Dict, translated_model: str) -> Dict:
     return {k: v for k, v in payload.items() if k != "output_config"}
 
 
+def translate_thinking_enabled_to_adaptive(payload: Dict, translated_model: str) -> Dict:
+    """Translate legacy thinking.type=enabled to the new adaptive protocol when
+    the target model only accepts the new one.
+
+    Newer Copilot-served Claude models (Opus 4.7+) reject thinking.type=enabled
+    with a 400 ("Use thinking.type.adaptive and output_config.effort"). This shim
+    auto-translates so old clients keep working without code changes.
+
+    Trigger: thinking.type=="enabled" AND the model reports a non-empty
+    reasoning_effort capability. Models without reasoning_effort are treated as
+    old-protocol and pass through unchanged.
+
+    Mapping (budget_tokens -> effort): <4096 low, <16384 medium, >=16384 high.
+    xhigh/max are intentionally not auto-selected since not every effort-aware
+    model supports them; apply_effort_policy gates the result either way.
+
+    A client-supplied output_config.effort always wins over the mapped value.
+    max_tokens is bumped to preserve response headroom that the original
+    budget_tokens implied (mirrors adjust_max_tokens_for_thinking, since
+    budget_tokens is dropped by this translation).
+    """
+    thinking = payload.get("thinking")
+    if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+        return payload
+
+    if not supported_reasoning_efforts(translated_model):
+        return payload
+
+    budget_tokens = thinking.get("budget_tokens") or 0
+    if budget_tokens and budget_tokens < 4096:
+        mapped_effort = "low"
+    elif budget_tokens < 16384:
+        mapped_effort = "medium"
+    else:
+        mapped_effort = "high"
+
+    new_payload = {**payload, "thinking": {"type": "adaptive"}}
+
+    existing_oc = payload.get("output_config")
+    if isinstance(existing_oc, dict) and existing_oc.get("effort") is not None:
+        print(f"[ThinkingTranslate] {translated_model}: enabled(budget={budget_tokens}) "
+              f"-> adaptive; preserving client effort={existing_oc.get('effort')}")
+    else:
+        merged_oc = dict(existing_oc) if isinstance(existing_oc, dict) else {}
+        merged_oc["effort"] = mapped_effort
+        new_payload["output_config"] = merged_oc
+        print(f"[ThinkingTranslate] {translated_model}: enabled(budget={budget_tokens}) "
+              f"-> adaptive + effort={mapped_effort}")
+
+    max_tokens = new_payload.get("max_tokens", 0)
+    if budget_tokens and max_tokens <= budget_tokens:
+        response_buffer = min(16384, budget_tokens)
+        new_max_tokens = budget_tokens + response_buffer
+        print(f"[ThinkingTranslate] Adjusted max_tokens: {max_tokens} -> {new_max_tokens} "
+              f"(preserving headroom from original budget_tokens={budget_tokens})")
+        new_payload["max_tokens"] = new_max_tokens
+
+    return new_payload
+
+
 def _remove_scope_from_ephemeral_cache_control(block: Dict) -> None:
     """Remove 'scope' key from a block's cache_control if type is 'ephemeral'."""
     cc = block.get("cache_control")
@@ -395,6 +455,11 @@ def anthropic_messages():
 
     # Apply tool result suffix filters (applies to both paths)
     anthropic_payload = apply_tool_result_suffix_filter_to_payload(anthropic_payload)
+
+    # Translate legacy thinking.type=enabled to adaptive+effort for new-protocol
+    # models (applies to both paths; must run before apply_effort_policy so the
+    # mapped effort goes through the same capability gate as a client-supplied one).
+    anthropic_payload = translate_thinking_enabled_to_adaptive(anthropic_payload, translated_model)
 
     # Decide reasoning effort support per model (applies to both paths)
     anthropic_payload = apply_effort_policy(anthropic_payload, translated_model)
