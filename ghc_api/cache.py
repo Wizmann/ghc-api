@@ -33,8 +33,9 @@ class RequestCache:
     STATE_COMPLETED = "completed"
     STATE_ERROR = "error"
 
-    def __init__(self, max_entries: int = 1000):
+    def __init__(self, max_entries: int = 1000, max_request_size: int = 1024 * 1024):
         self.max_entries = max_entries
+        self.max_request_size = max_request_size
         self.cache: OrderedDict = OrderedDict()
         self.lock = threading.Lock()
         self.request_count = 0
@@ -53,6 +54,18 @@ class RequestCache:
     @staticmethod
     def _current_timestamp() -> int:
         return int(time.time())
+
+    def _truncate_oversize_bodies(self, entry: Dict[str, Any]) -> None:
+        """Replace request/response bodies with a placeholder when they exceed the configured size limit."""
+        if not self.max_request_size or self.max_request_size <= 0:
+            return
+        limit = self.max_request_size
+        if entry.get("request_size", 0) and entry["request_size"] > limit:
+            placeholder = {"_truncated": True, "_size": entry["request_size"], "_reason": f"request body exceeded cache_max_request_size ({limit} bytes)"}
+            entry["request_body"] = placeholder
+            entry["original_request_body"] = placeholder
+        if entry.get("response_size", 0) and entry["response_size"] > limit:
+            entry["response_body"] = {"_truncated": True, "_size": entry["response_size"], "_reason": f"response body exceeded cache_max_request_size ({limit} bytes)"}
 
     @classmethod
     def _normalize_import_timestamp(cls, value: Any) -> int:
@@ -102,6 +115,7 @@ class RequestCache:
                 "state": self.STATE_PENDING,
                 "user_id": _coerce_user_id(data.get("user_id")),
             }
+            self._truncate_oversize_bodies(self.cache[request_id])
 
     def update_request_state(self, request_id: str, state: str, **kwargs) -> None:
         """Update the state and optional fields of an existing request"""
@@ -139,6 +153,7 @@ class RequestCache:
                 # path or external caller forgot), fall back to anonymous.
                 if not entry.get("user_id"):
                     entry["user_id"] = _coerce_user_id(data.get("user_id"))
+                self._truncate_oversize_bodies(entry)
             else:
                 # Fallback: create new entry if somehow missing
                 if len(self.cache) >= self.max_entries:
@@ -165,6 +180,7 @@ class RequestCache:
                     "state": self.STATE_COMPLETED if data.get("status_code", 200) < 400 else self.STATE_ERROR,
                     "user_id": _coerce_user_id(data.get("user_id")),
                 }
+                self._truncate_oversize_bodies(self.cache[request_id])
 
             self.request_count += 1
             self.bytes_sent += data.get("request_size", 0)
@@ -475,6 +491,7 @@ class RequestCache:
                 "state": data.get("state", "completed"),
                 "user_id": user_id,
             }
+            self._truncate_oversize_bodies(self.cache[request_id])
 
             # Update stats
             self.request_count += 1
