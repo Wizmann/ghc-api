@@ -9,7 +9,7 @@ import uuid
 from typing import Dict, Generator, Any
 
 import requests
-from flask import Blueprint, Response, jsonify, request, stream_with_context
+from flask import Blueprint, Response, g, jsonify, request, stream_with_context
 
 from ..api_helpers import (
     ensure_copilot_token,
@@ -20,6 +20,7 @@ from ..api_helpers import (
     count_tokens,
 )
 from ..cache import cache
+from ..auth import redact_auth_headers
 from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
 from ..translator import (
     translate_anthropic_to_openai,
@@ -31,6 +32,11 @@ from ..translator import (
 from ..utils import log_error_request, is_orphaned_tool_result_error, remove_orphaned_tool_results, extract_orphaned_tool_use_ids, log_tool_result_cleanup, log_connection_retry, get_client_ip
 from ..state import state
 from ..web_search import has_web_search_tool, is_web_search_unsupported_error, apply_web_search_fallback
+
+
+def _current_user_id() -> str:
+    """Read user_id from flask.g; falls back to anonymous outside a request context."""
+    return getattr(g, "user_id", "anonymous") or "anonymous"
 
 anthropic_bp = Blueprint('anthropic', __name__)
 
@@ -369,9 +375,10 @@ def anthropic_messages():
     anthropic_payload = request.get_json()
     request_id = str(uuid.uuid4())
 
-    # Capture incoming request headers
-    request_headers = dict(request.headers)
+    # Capture incoming request headers (auth values redacted before caching).
+    request_headers = redact_auth_headers(dict(request.headers))
     client_ip = get_client_ip(request)
+    user_id = _current_user_id()
 
     # Store original request before any modifications
     original_request_body = copy.deepcopy(anthropic_payload)
@@ -398,15 +405,17 @@ def anthropic_messages():
 
     if use_direct_api:
         print(f"[Anthropic API] Using direct Anthropic API path for model: {translated_model}")
-        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip)
+        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
     else:
         print(f"[Anthropic API] Using OpenAI translation path for model: {translated_model}")
-        return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip)
+        return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
 
 
 def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, start_time: float,
                                      original_model: str, translated_model: str, original_request_body: Dict = None,
-                                     request_headers: Dict = None, client_ip: str = None) -> Response:
+                                     request_headers: Dict = None,
+                                     client_ip: str = None,
+                                     user_id: str = "anonymous") -> Response:
     """Handle request using direct Anthropic API (no translation needed)."""
 
     # Check for vision content
@@ -451,7 +460,8 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                 if use_streaming and response.ok:
                     return stream_direct_anthropic(response, filtered_payload, headers, request_id,
                             filtered_request_size, start_time,
-                            original_model, translated_model, original_request_body, request_headers, client_ip)
+                            original_model, translated_model, original_request_body, request_headers,
+                            client_ip=client_ip, user_id=user_id)
                 last_connection_error = None
                 break
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
@@ -493,6 +503,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                 "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
                 "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
                 "duration": duration,
+                "user_id": user_id,
             })
 
             if cleanup_log_entry is not None:
@@ -524,6 +535,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
                 "duration": duration,
+                "user_id": user_id,
             })
 
             # Handle web search unsupported error with proxy fallback
@@ -572,7 +584,9 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
 def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict, headers: Dict, request_id: str,
                             request_size: int, start_time: float,
                             original_model: str, translated_model: str, original_request_body: Dict = None,
-                            request_headers: Dict = None, client_ip: str = None) -> Response:
+                            request_headers: Dict = None,
+                            client_ip: str = None,
+                            user_id: str = "anonymous") -> Response:
     """Handle streaming direct Anthropic response (passthrough SSE events)."""
     # Start tracking request immediately
     cache.start_request(request_id, {
@@ -584,6 +598,7 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
         "translated_model": translated_model if translated_model != original_model else None,
         "endpoint": "/v1/messages",
         "request_size": request_size,
+        "user_id": user_id,
     })
 
     def generate() -> Generator[str, None, None]:
@@ -709,6 +724,7 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
             "cache_creation_input_tokens": total_cache_creation_input_tokens,
             "cache_read_input_tokens": total_cache_read_input_tokens,
             "duration": duration,
+            "user_id": user_id,
         })
 
     return Response(
@@ -724,7 +740,9 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
 
 def handle_translated_request(anthropic_payload: Dict, request_id: str, start_time: float,
                                original_model: str, translated_model: str, original_request_body: Dict = None,
-                               request_headers: Dict = None, client_ip: str = None) -> Response:
+                               request_headers: Dict = None,
+                               client_ip: str = None,
+                               user_id: str = "anonymous") -> Response:
     """Handle request using OpenAI translation path."""
     # Check for vision content
     enable_vision = any(
@@ -753,7 +771,8 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
         if anthropic_payload.get("stream"):
             return stream_anthropic_messages(openai_payload, headers, request_id,
                                             current_payload, openai_request_size, start_time,
-                                            original_model, translated_model, original_request_body, request_headers, client_ip)
+                                            original_model, translated_model, original_request_body, request_headers,
+                                            client_ip=client_ip, user_id=user_id)
 
         # Non-streaming request
         connection_retries = state.max_connection_retries
@@ -808,6 +827,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
                 "output_tokens": usage.get("completion_tokens", 0),
                 "cache_read_input_tokens": cached_tokens,
                 "duration": duration,
+                "user_id": user_id,
             })
 
             return jsonify(anthropic_response)
@@ -858,7 +878,9 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
 def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: str,
                               anthropic_payload: Dict, request_size: int, start_time: float,
                               original_model: str, translated_model: str, original_request_body: Dict = None,
-                              request_headers: Dict = None, client_ip: str = None) -> Response:
+                              request_headers: Dict = None,
+                              client_ip: str = None,
+                              user_id: str = "anonymous") -> Response:
     """Handle streaming Anthropic messages"""
     # Start tracking request immediately
     cache.start_request(request_id, {
@@ -870,6 +892,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
         "translated_model": translated_model if translated_model != original_model else None,
         "endpoint": "/v1/messages",
         "request_size": request_size,
+        "user_id": user_id,
     })
 
     def generate() -> Generator[str, None, None]:
@@ -1001,6 +1024,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
             "output_tokens": total_output_tokens,
             "cache_read_input_tokens": total_cache_read_input_tokens,
             "duration": duration,
+            "user_id": user_id,
         })
 
     return Response(
