@@ -129,9 +129,10 @@ class LeakedToolCallTransformer:
     ends to flush any pending state.
     """
 
-    def __init__(self, enabled: bool = True) -> None:
-        # When False the transformer never recovers tool calls: events are forwarded
-        # untouched and only plain text is accumulated for the cached response body.
+    def __init__(self, enabled: bool = False) -> None:
+        # When False (the default) the transformer never recovers tool calls: events are
+        # forwarded untouched and only plain text is accumulated for the cached response
+        # body. Recovery must be explicitly opted into (see state.enable_tool_call_recovery).
         self._enabled = enabled
         # Index bookkeeping so injected tool_use blocks get unique, increasing indices.
         self._max_index = -1

@@ -17,7 +17,7 @@ def _run(events):
 
     Returns the flat list of emitted (event_type, parsed_data_dict_or_str).
     """
-    transformer = LeakedToolCallTransformer()
+    transformer = LeakedToolCallTransformer(enabled=True)
     emitted = []
     for event_type, event in events:
         raw = json.dumps(event)
@@ -50,6 +50,30 @@ def _input_jsons(emitted):
         for et, e in emitted
         if et == "content_block_delta" and e.get("delta", {}).get("type") == "input_json_delta"
     ]
+
+
+# A representative leak: prose followed by a leaked invoke construct.
+LEAK = (
+    "Let me check the repository status.\n\ncall\n"
+    '<invoke name="Bash">\n'
+    '<parameter name="command">cd /repo\ngit status --short</parameter>\n'
+    '<parameter name="description">Poll</parameter>\n'
+    "</invoke>"
+)
+
+
+def _leak_events(chunks):
+    """Build SSE events for a single text block carrying the given text chunks."""
+    events = [
+        ("content_block_start", {"type": "content_block_start", "index": 0,
+                                 "content_block": {"type": "text", "text": ""}}),
+    ]
+    for chunk in chunks:
+        events.append(("content_block_delta", _delta_event(0, chunk)))
+    events.append(("content_block_stop", {"type": "content_block_stop", "index": 0}))
+    events.append(("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}))
+    events.append(("message_stop", {"type": "message_stop"}))
+    return events
 
 
 class NormalPassthroughTest(unittest.TestCase):
@@ -115,25 +139,10 @@ class NormalPassthroughTest(unittest.TestCase):
 
 
 class LeakRecoveryTest(unittest.TestCase):
-    LEAK = (
-        "Let me check the repository status.\n\ncall\n"
-        '<invoke name="Bash">\n'
-        '<parameter name="command">cd /repo\ngit status --short</parameter>\n'
-        '<parameter name="description">Poll</parameter>\n'
-        "</invoke>"
-    )
+    LEAK = LEAK
 
     def _leak_events(self, chunks):
-        events = [
-            ("content_block_start", {"type": "content_block_start", "index": 0,
-                                     "content_block": {"type": "text", "text": ""}}),
-        ]
-        for chunk in chunks:
-            events.append(("content_block_delta", _delta_event(0, chunk)))
-        events.append(("content_block_stop", {"type": "content_block_stop", "index": 0}))
-        events.append(("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}))
-        events.append(("message_stop", {"type": "message_stop"}))
-        return events
+        return _leak_events(chunks)
 
     def test_single_chunk_leak_is_recovered(self):
         transformer, emitted = _run(self._leak_events([self.LEAK]))
@@ -220,32 +229,27 @@ def _run_disabled(events):
 
 
 class DisabledPassthroughTest(unittest.TestCase):
-    LEAK = LeakRecoveryTest.LEAK
-
-    def _leak_events(self, chunks):
-        return LeakRecoveryTest._leak_events(self, chunks)
-
     def test_leak_is_not_recovered_when_disabled(self):
         # The same leak that LeakRecoveryTest recovers must pass through untouched.
-        transformer, emitted = _run_disabled(self._leak_events([self.LEAK]))
+        transformer, emitted = _run_disabled(_leak_events([LEAK]))
         self.assertFalse(transformer.recovered_any)
         # No tool_use blocks are injected; the leaked text is emitted verbatim.
         self.assertEqual(_tool_uses(emitted), [])
-        self.assertEqual(_text_of(emitted), self.LEAK)
+        self.assertEqual(_text_of(emitted), LEAK)
         # stop_reason is left untouched (not rewritten to tool_use).
         stop_reasons = [e["delta"]["stop_reason"] for et, e in emitted if et == "message_delta"]
         self.assertEqual(stop_reasons, ["end_turn"])
 
     def test_events_pass_through_unchanged_when_disabled(self):
-        events = self._leak_events([self.LEAK])
+        events = _leak_events([LEAK])
         transformer, emitted = _run_disabled(events)
         # Every input event is forwarded, in order, byte-for-byte.
         self.assertEqual(emitted, [(et, ev) for et, ev in events])
 
     def test_disabled_cache_content_captures_text(self):
-        transformer, _ = _run_disabled(self._leak_events([self.LEAK]))
+        transformer, _ = _run_disabled(_leak_events([LEAK]))
         content = transformer.build_response_content()
-        self.assertEqual(content, [{"type": "text", "text": self.LEAK}])
+        self.assertEqual(content, [{"type": "text", "text": LEAK}])
 
 
 if __name__ == "__main__":
