@@ -4,6 +4,7 @@ from unittest import mock
 from flask import Flask
 
 from ghc_api.api_helpers import supports_chat_completions_api, supports_responses_api
+from ghc_api.cache import cache
 from ghc_api.routes import openai as openai_routes
 from ghc_api.state import state
 
@@ -53,6 +54,7 @@ class OpenAIChatResponsesCompatTests(unittest.TestCase):
         state.enable_gpt_chat_completions_responses_compat = self.original_flag
         state.copilot_token = self.original_token
         state.token_expires_at = self.original_expires
+        cache.cache.clear()
 
     def test_endpoint_capability_helpers_normalize_common_http_paths(self):
         self.assertTrue(supports_responses_api("gpt-5.5"))
@@ -94,6 +96,24 @@ class OpenAIChatResponsesCompatTests(unittest.TestCase):
             },
         }])
         self.assertEqual(payload["tool_choice"], {"type": "function", "name": "calculator"})
+
+    def test_small_chat_token_limit_is_clamped_for_responses_api(self):
+        payload = openai_routes.chat_payload_to_responses_payload({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 8,
+        })
+
+        self.assertEqual(payload["max_output_tokens"], 16)
+
+    def test_small_chat_completion_token_limit_is_clamped_for_responses_api(self):
+        payload = openai_routes.chat_payload_to_responses_payload({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_completion_tokens": 8,
+        })
+
+        self.assertEqual(payload["max_output_tokens"], 16)
 
     @mock.patch.object(openai_routes.requests, "post")
     def test_default_disabled_keeps_chat_completions_upstream(self, post):
@@ -152,6 +172,27 @@ class OpenAIChatResponsesCompatTests(unittest.TestCase):
         self.assertEqual(data["usage"]["prompt_tokens"], 4)
         self.assertEqual(data["usage"]["completion_tokens"], 2)
         self.assertEqual(data["usage"]["prompt_tokens_details"]["cached_tokens"], 1)
+
+    @mock.patch.object(openai_routes.requests, "post")
+    def test_enabled_gpt_responses_error_is_cached(self, post):
+        state.enable_gpt_chat_completions_responses_compat = True
+        post.return_value = FakeResponse({
+            "error": {
+                "message": "Invalid request",
+                "code": "invalid_request_body",
+            }
+        }, status_code=400)
+
+        response = self.client.post("/v1/chat/completions", json={
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+
+        self.assertEqual(response.status_code, 400)
+        cached = cache.get_recent_requests(1)
+        self.assertEqual(len(cached), 1)
+        self.assertEqual(cached[0]["state"], cache.STATE_ERROR)
+        self.assertEqual(cached[0]["response_body"]["error"]["code"], "invalid_request_body")
 
     @mock.patch.object(openai_routes.requests, "post")
     def test_enabled_does_not_shim_non_gpt_models(self, post):

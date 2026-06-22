@@ -27,6 +27,8 @@ from ..utils import log_error_request, log_connection_retry, is_encrypted_conten
 
 openai_bp = Blueprint('openai', __name__)
 
+RESPONSES_MIN_MAX_OUTPUT_TOKENS = 16
+
 
 def _is_gpt_model(model_id: str) -> bool:
     return isinstance(model_id, str) and model_id.lower().startswith("gpt-")
@@ -328,6 +330,25 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
         return jsonify(result)
 
     log_error_request("/v1/chat/completions (responses compat)", responses_payload, response.text, response.status_code)
+    response_size = len(response.text)
+    try:
+        result = response.json()
+    except Exception:
+        result = response.text
+    cache.add_request(request_id, {
+        "request_headers": request_headers,
+        "request_body": payload,
+        "response_body": result,
+        "model": original_model,
+        "translated_model": translated_model if translated_model != original_model else None,
+        "endpoint": "/v1/chat/completions",
+        "status_code": response.status_code,
+        "request_size": request_size,
+        "response_size": response_size,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "duration": duration,
+    })
     return Response(response.text, status=response.status_code, mimetype="application/json")
 
 
@@ -357,14 +378,20 @@ def chat_payload_to_responses_payload(payload: Dict) -> Dict:
         responses_payload["tool_choice"] = chat_tool_choice_to_responses_tool_choice(payload.get("tool_choice"))
 
     if "max_completion_tokens" in payload:
-        responses_payload["max_output_tokens"] = payload["max_completion_tokens"]
+        responses_payload["max_output_tokens"] = clamp_responses_max_output_tokens(payload["max_completion_tokens"])
     elif "max_tokens" in payload:
-        responses_payload["max_output_tokens"] = payload["max_tokens"]
+        responses_payload["max_output_tokens"] = clamp_responses_max_output_tokens(payload["max_tokens"])
 
     if "stop" in payload:
         responses_payload["stop"] = payload["stop"]
 
     return {key: value for key, value in responses_payload.items() if value is not None}
+
+
+def clamp_responses_max_output_tokens(value):
+    if isinstance(value, int) and not isinstance(value, bool):
+        return max(value, RESPONSES_MIN_MAX_OUTPUT_TOKENS)
+    return value
 
 
 def chat_tools_to_responses_tools(tools):
