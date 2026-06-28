@@ -377,6 +377,39 @@ def _chat_completion_chunk(chunk_id: str, model: str, delta: Dict = None,
     return chunk
 
 
+def _chat_completion_usage_chunk(chunk_id: str, model: str, usage: Dict,
+                                 created: int = None, object_type: str = "chat.completion.chunk") -> Dict:
+    return {
+        "id": chunk_id,
+        "object": object_type,
+        "created": created if created is not None else int(time.time()),
+        "model": model,
+        "choices": [],
+        "usage": usage,
+    }
+
+
+def _split_streaming_usage_chunk(chunk: Dict) -> list[Dict]:
+    """Keep usage in a separate SSE chunk for OpenAI-compatible clients.
+
+    Some clients built on the OpenAI AI SDK expect the final token-usage event
+    to have choices: [] instead of sharing the same chunk as finish_reason.
+    """
+    if not isinstance(chunk, dict) or not chunk.get("usage") or not chunk.get("choices"):
+        return [chunk]
+
+    chunk_without_usage = dict(chunk)
+    usage = chunk_without_usage.pop("usage")
+    usage_chunk = _chat_completion_usage_chunk(
+        chunk_id=chunk.get("id", ""),
+        model=chunk.get("model", ""),
+        usage=usage,
+        created=chunk.get("created"),
+        object_type=chunk.get("object", "chat.completion.chunk"),
+    )
+    return [chunk_without_usage, usage_chunk]
+
+
 def stream_chat_completions_via_responses(response: requests.Response, request_id: str,
                                           request_body: str, request_size: int, start_time: float,
                                           original_model: str, translated_model: str, chat_payload: Dict,
@@ -508,10 +541,12 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                             original_model,
                             delta={},
                             finish_reason="tool_calls" if saw_tool_call else "stop",
-                            usage=chat_usage,
                         )
+                        usage_chunk = _chat_completion_usage_chunk(chunk_id, original_model, chat_usage)
                         response_chunks.append(finish_chunk)
+                        response_chunks.append(usage_chunk)
                         yield f"data: {json.dumps(finish_chunk)}\n\n"
+                        yield f"data: {json.dumps(usage_chunk)}\n\n"
                     elif event_type == "response.failed":
                         error_occurred = True
                         status_code = 500
@@ -994,7 +1029,8 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
 
                     try:
                         chunk = json.loads(data)
-                        response_chunks.append(chunk)
+                        chunks_to_emit = _split_streaming_usage_chunk(chunk)
+                        response_chunks.extend(chunks_to_emit)
 
                         # Update state to receiving on first chunk
                         if not first_chunk_received:
@@ -1007,7 +1043,8 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                             total_input_tokens = chunk["usage"].get("prompt_tokens", 0)
                             total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
 
-                        yield f"data: {data}\n\n"
+                        for chunk_to_emit in chunks_to_emit:
+                            yield f"data: {json.dumps(chunk_to_emit)}\n\n"
                     except json.JSONDecodeError:
                         continue
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:

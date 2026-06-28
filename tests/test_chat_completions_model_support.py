@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest import mock
 
@@ -13,6 +14,7 @@ from ghc_api.routes.openai import (
     _chat_completions_to_responses_payload,
     _responses_to_chat_completion,
     _should_route_chat_completions_via_responses,
+    _split_streaming_usage_chunk,
     chat_completions_via_responses,
     stream_chat_completions_via_responses,
 )
@@ -421,6 +423,72 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
         self.assertNotIn("data: [DONE]", body)
         self.assertEqual(cache.cache["req-1"]["state"], cache.STATE_ERROR)
         self.assertEqual(cache.cache["req-1"]["status_code"], 500)
+
+    def test_streaming_responses_compat_emits_usage_as_separate_chunk(self):
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def iter_lines(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"{\\"action\\":\\"proceed\\"}"}'
+                yield b'data: {"type":"response.completed","response":{"id":"resp-1","output_text":"{\\"action\\":\\"proceed\\"}","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}'
+                yield b'data: [DONE]'
+
+        app = create_app()
+
+        with app.test_request_context("/v1/chat/completions"):
+            response = stream_chat_completions_via_responses(
+                response=FakeResponse(),
+                request_id="req-usage",
+                request_body="{}",
+                request_size=2,
+                start_time=0,
+                original_model="gpt-5.5",
+                translated_model="gpt-5.5",
+                chat_payload={"model": "gpt-5.5"},
+                responses_payload={"model": "gpt-5.5"},
+            )
+            body = "".join(response.response)
+
+        events = [
+            json.loads(line[len("data: "):])
+            for line in body.splitlines()
+            if line.startswith("data: {")
+        ]
+        finish_event = next(event for event in events if event["choices"] and event["choices"][0]["finish_reason"] == "stop")
+        usage_event = next(event for event in events if event["choices"] == [])
+
+        self.assertNotIn("usage", finish_event)
+        self.assertEqual(usage_event["usage"], {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5,
+        })
+        self.assertIn("data: [DONE]", body)
+
+    def test_split_streaming_usage_chunk_moves_usage_to_empty_choices_chunk(self):
+        chunk = {
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 123,
+            "model": "gpt-5.5",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+        }
+
+        chunks = _split_streaming_usage_chunk(chunk)
+
+        self.assertEqual(len(chunks), 2)
+        self.assertNotIn("usage", chunks[0])
+        self.assertEqual(chunks[0]["choices"], [{"index": 0, "delta": {}, "finish_reason": "stop"}])
+        self.assertEqual(chunks[1], {
+            "id": "chatcmpl-1",
+            "object": "chat.completion.chunk",
+            "created": 123,
+            "model": "gpt-5.5",
+            "choices": [],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+        })
 
 
 if __name__ == "__main__":
