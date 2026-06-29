@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest import mock
 
@@ -14,6 +15,7 @@ from ghc_api.routes.openai import (
     _responses_to_chat_completion,
     _should_route_chat_completions_via_responses,
     chat_completions_via_responses,
+    stream_chat_completions,
     stream_chat_completions_via_responses,
 )
 
@@ -421,6 +423,143 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
         self.assertNotIn("data: [DONE]", body)
         self.assertEqual(cache.cache["req-1"]["state"], cache.STATE_ERROR)
         self.assertEqual(cache.cache["req-1"]["status_code"], 500)
+
+    def test_streaming_responses_tool_call_matches_chat_chunk_shape(self):
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def iter_lines(self):
+                yield b'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call-1","name":"get_weather"}}'
+                yield b'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\""}'
+                yield b'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"location"}'
+                yield b'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"\\":\\"SF\\"}"}'
+                yield b'data: {"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","call_id":"call-1","name":"get_weather","arguments":"{\\"location\\":\\"SF\\"}"}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}'
+
+        app = create_app()
+
+        with app.test_request_context("/v1/chat/completions"):
+            response = stream_chat_completions_via_responses(
+                response=FakeResponse(),
+                request_id="req-1",
+                request_body="{}",
+                request_size=2,
+                start_time=0,
+                original_model="gpt-5.5",
+                translated_model="gpt-5.5",
+                chat_payload={"model": "gpt-5.5"},
+                responses_payload={"model": "gpt-5.5"},
+            )
+            body = "".join(response.response)
+
+        data_lines = [
+            line.removeprefix("data: ")
+            for line in body.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        chunks = [json.loads(line) for line in data_lines]
+
+        first_delta = chunks[0]["choices"][0]["delta"]
+        self.assertEqual(first_delta["role"], "assistant")
+        self.assertIsNone(first_delta["content"])
+        self.assertEqual(first_delta["tool_calls"][0]["id"], "call-1")
+        self.assertEqual(first_delta["tool_calls"][0]["function"]["name"], "get_weather")
+
+        argument_deltas = [
+            chunk["choices"][0]["delta"]
+            for chunk in chunks[1:-1]
+        ]
+        self.assertTrue(argument_deltas)
+        self.assertTrue(all(delta.get("content") is None for delta in argument_deltas))
+
+        finish_choice = chunks[-1]["choices"][0]
+        self.assertIsNone(finish_choice["delta"]["content"])
+        self.assertEqual(finish_choice["finish_reason"], "tool_calls")
+        self.assertIn("data: [DONE]", body)
+        self.assertEqual(cache.cache["req-1"]["state"], cache.STATE_COMPLETED)
+
+    def test_streaming_responses_text_chunks_include_native_like_null_content_boundaries(self):
+        class FakeResponse:
+            ok = True
+            status_code = 200
+
+            def iter_lines(self):
+                yield b'data: {"type":"response.output_text.delta","delta":"Hello"}'
+                yield b'data: {"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}'
+
+        app = create_app()
+
+        with app.test_request_context("/v1/chat/completions"):
+            response = stream_chat_completions_via_responses(
+                response=FakeResponse(),
+                request_id="req-1",
+                request_body="{}",
+                request_size=2,
+                start_time=0,
+                original_model="gpt-5.5",
+                translated_model="gpt-5.5",
+                chat_payload={"model": "gpt-5.5"},
+                responses_payload={"model": "gpt-5.5"},
+            )
+            body = "".join(response.response)
+
+        data_lines = [
+            line.removeprefix("data: ")
+            for line in body.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        chunks = [json.loads(line) for line in data_lines]
+
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"content": None, "role": "assistant"})
+        self.assertEqual(chunks[1]["choices"][0]["delta"], {"content": "Hello"})
+        self.assertEqual(chunks[-1]["choices"][0]["delta"], {"content": None})
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
+        self.assertIn("data: [DONE]", body)
+
+    def test_native_streaming_tool_call_indexes_are_compacted(self):
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                yield b'data: {"choices":[{"index":0,"delta":{"content":"Checking","role":"assistant"}}],"created":1,"id":"chat-1","model":"claude-sonnet-4.6"}'
+                yield b'data: {"choices":[{"index":0,"delta":{"content":null,"tool_calls":[{"function":{"name":"get_weather"},"id":"tooluse_1","index":2,"type":"function"}]}}],"created":1,"id":"chat-1","model":"claude-sonnet-4.6"}'
+                yield b'data: {"choices":[{"index":0,"delta":{"content":null,"tool_calls":[{"function":{"arguments":"{\\"location\\":\\"SF\\"}"},"index":2,"type":"function"}]}}],"created":1,"id":"chat-1","model":"claude-sonnet-4.6"}'
+                yield b'data: {"choices":[{"finish_reason":"tool_calls","index":0,"delta":{"content":null}}],"created":1,"id":"chat-1","usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8},"model":"claude-sonnet-4.6"}'
+                yield b"data: [DONE]"
+
+        app = create_app()
+
+        with app.test_request_context("/v1/chat/completions"):
+            with mock.patch("ghc_api.routes.openai.requests.post", return_value=FakeResponse()):
+                response = stream_chat_completions(
+                    payload={"model": "claude-sonnet-4.6", "stream": True},
+                    headers={},
+                    request_id="req-1",
+                    request_body="{}",
+                    request_size=2,
+                    start_time=0,
+                    original_model="claude-sonnet-4.6",
+                    translated_model="claude-sonnet-4.6",
+                )
+                body = "".join(response.response)
+
+        data_lines = [
+            line.removeprefix("data: ")
+            for line in body.splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        chunks = [json.loads(line) for line in data_lines]
+
+        tool_start = chunks[1]["choices"][0]["delta"]["tool_calls"][0]
+        self.assertEqual(tool_start["index"], 0)
+        self.assertEqual(tool_start["function"]["arguments"], "")
+
+        tool_args = chunks[2]["choices"][0]["delta"]["tool_calls"][0]
+        self.assertEqual(tool_args["index"], 0)
+
+        response_body = cache.cache["req-1"]["response_body"]
+        self.assertEqual(response_body["choices"][0]["finish_reason"], "tool_calls")
+        self.assertEqual(response_body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"], "{\"location\":\"SF\"}")
 
 
 if __name__ == "__main__":
