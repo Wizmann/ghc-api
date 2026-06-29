@@ -80,10 +80,13 @@ def iter_lines_with_keepalive(response, interval):
         return
 
     q: "queue.Queue" = queue.Queue()
+    stop = threading.Event()
 
     def _reader():
         try:
             for line in response.iter_lines():
+                if stop.is_set():
+                    break
                 q.put((False, line))
         except Exception as exc:  # propagate to the consumer thread
             q.put((True, exc))
@@ -92,14 +95,21 @@ def iter_lines_with_keepalive(response, interval):
 
     threading.Thread(target=_reader, daemon=True).start()
 
-    while True:
-        try:
-            is_exc, item = q.get(timeout=interval)
-        except queue.Empty:
-            yield KEEPALIVE
-            continue
-        if is_exc:
-            raise item
-        if item is _SENTINEL:
-            return
-        yield item
+    try:
+        while True:
+            try:
+                is_exc, item = q.get(timeout=interval)
+            except queue.Empty:
+                yield KEEPALIVE
+                continue
+            if is_exc:
+                raise item
+            if item is _SENTINEL:
+                return
+            yield item
+    finally:
+        # On early consumer exit (e.g. client disconnect -> GeneratorExit),
+        # signal the reader to stop and close the upstream response so the
+        # thread's blocking ``iter_lines()`` unblocks instead of lingering.
+        stop.set()
+        response.close()

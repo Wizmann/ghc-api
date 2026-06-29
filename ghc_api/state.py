@@ -43,7 +43,8 @@ class State:
         # Retry settings
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
 
-        # Upstream request read timeout in seconds (per requests.post call).
+        # Upstream request timeout in seconds, passed to requests as a single
+        # value so it applies to both the connect and read phases.
         self.upstream_read_timeout: int = 1800
 
         # SSE keepalive: when a stream is idle this many seconds, emit a keepalive
