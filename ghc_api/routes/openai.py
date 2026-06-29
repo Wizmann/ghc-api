@@ -380,6 +380,38 @@ def _chat_completion_chunk(chunk_id: str, model: str, delta: Dict = None,
     return chunk
 
 
+def _normalize_stream_tool_calls(chunk: Dict, tool_index_map: Dict[int, int]) -> Dict:
+    """Normalize native Copilot chat tool-call chunks to OpenAI client expectations."""
+    for choice in chunk.get("choices", []) or []:
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+
+        tool_calls = delta.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+
+        if "content" not in delta:
+            delta["content"] = None
+
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+
+            upstream_index = tool_call.get("index", 0)
+            if not isinstance(upstream_index, int):
+                upstream_index = 0
+            if upstream_index not in tool_index_map:
+                tool_index_map[upstream_index] = len(tool_index_map)
+            tool_call["index"] = tool_index_map[upstream_index]
+
+            function = tool_call.get("function")
+            if isinstance(function, dict) and "name" in function and "arguments" not in function:
+                function["arguments"] = ""
+
+    return chunk
+
+
 def stream_chat_completions_via_responses(response: requests.Response, request_id: str,
                                           request_body: str, request_size: int, start_time: float,
                                           original_model: str, translated_model: str, chat_payload: Dict,
@@ -412,6 +444,7 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
         chunk_id = f"chatcmpl-{request_id}"
         tool_index_by_output_index = {}
         saw_tool_call = False
+        role_sent = False
 
         try:
             cache.update_request_state(request_id, cache.STATE_SENDING)
@@ -425,10 +458,6 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                     except Exception:
                         response_data = {"error": error_text}
             else:
-                role_chunk = _chat_completion_chunk(chunk_id, original_model, delta={"role": "assistant"})
-                response_chunks.append(role_chunk)
-                yield f"data: {json.dumps(role_chunk)}\n\n"
-
                 for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
                     if line is KEEPALIVE:
                         counters.incr("ping_sent")
@@ -461,6 +490,15 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                     if event_type == "response.output_text.delta":
                         text_delta = event.get("delta", "")
                         if text_delta:
+                            if not role_sent:
+                                role_chunk = _chat_completion_chunk(
+                                    chunk_id,
+                                    original_model,
+                                    delta={"content": None, "role": "assistant"},
+                                )
+                                response_chunks.append(role_chunk)
+                                role_sent = True
+                                yield f"data: {json.dumps(role_chunk)}\n\n"
                             accumulated_text.append(text_delta)
                             chunk = _chat_completion_chunk(chunk_id, original_model, delta={"content": text_delta})
                             response_chunks.append(chunk)
@@ -472,20 +510,25 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                             tool_index = len(tool_index_by_output_index)
                             tool_index_by_output_index[output_index] = tool_index
                             saw_tool_call = True
+                            tool_delta = {
+                                "content": None,
+                                "tool_calls": [{
+                                    "index": tool_index,
+                                    "id": item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": item.get("name", ""),
+                                        "arguments": "",
+                                    },
+                                }]
+                            }
+                            if not role_sent:
+                                tool_delta["role"] = "assistant"
+                                role_sent = True
                             chunk = _chat_completion_chunk(
                                 chunk_id,
                                 original_model,
-                                delta={
-                                    "tool_calls": [{
-                                        "index": tool_index,
-                                        "id": item.get("call_id") or item.get("id") or f"call_{uuid.uuid4().hex}",
-                                        "type": "function",
-                                        "function": {
-                                            "name": item.get("name", ""),
-                                            "arguments": "",
-                                        },
-                                    }]
-                                },
+                                delta=tool_delta,
                             )
                             response_chunks.append(chunk)
                             yield f"data: {json.dumps(chunk)}\n\n"
@@ -496,6 +539,7 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                                 chunk_id,
                                 original_model,
                                 delta={
+                                    "content": None,
                                     "tool_calls": [{
                                         "index": tool_index_by_output_index[output_index],
                                         "function": {
@@ -513,10 +557,19 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                         total_input_tokens = chat_usage.get("prompt_tokens", 0)
                         total_output_tokens = chat_usage.get("completion_tokens", 0)
                         total_cache_read_input_tokens = chat_usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                        if not role_sent:
+                            role_chunk = _chat_completion_chunk(
+                                chunk_id,
+                                original_model,
+                                delta={"content": None, "role": "assistant"},
+                            )
+                            response_chunks.append(role_chunk)
+                            role_sent = True
+                            yield f"data: {json.dumps(role_chunk)}\n\n"
                         finish_chunk = _chat_completion_chunk(
                             chunk_id,
                             original_model,
-                            delta={},
+                            delta={"content": None},
                             finish_reason="tool_calls" if saw_tool_call else "stop",
                             usage=chat_usage,
                         )
@@ -978,6 +1031,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
         error_occurred = False
         status_code = 200
         first_chunk_received = False
+        tool_index_map = {}
 
         try:
             # Update state to sending
@@ -1010,6 +1064,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
 
                     try:
                         chunk = json.loads(data)
+                        chunk = _normalize_stream_tool_calls(chunk, tool_index_map)
                         response_chunks.append(chunk)
 
                         # Update state to receiving on first chunk
@@ -1023,7 +1078,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                             total_input_tokens = chunk["usage"].get("prompt_tokens", 0)
                             total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
 
-                        yield f"data: {data}\n\n"
+                        yield f"data: {json.dumps(chunk)}\n\n"
                     except json.JSONDecodeError:
                         continue
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
@@ -1265,4 +1320,3 @@ def responses():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-

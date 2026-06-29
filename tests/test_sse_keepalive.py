@@ -30,6 +30,9 @@ class _SlowResponse:
         time.sleep(self._delay)
         yield self._line
 
+    def close(self):
+        pass
+
 
 class _ImmediateResponse:
     def __init__(self, lines):
@@ -37,6 +40,9 @@ class _ImmediateResponse:
 
     def iter_lines(self):
         yield from self._lines
+
+    def close(self):
+        pass
 
 
 class _RaisingResponse:
@@ -46,6 +52,9 @@ class _RaisingResponse:
     def iter_lines(self):
         raise self._exc
         yield  # pragma: no cover - makes this a generator
+
+    def close(self):
+        pass
 
 
 class KeepaliveTest(unittest.TestCase):

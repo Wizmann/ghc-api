@@ -21,6 +21,9 @@ class _FakeStreamResponse:
     def iter_lines(self):
         yield from self._lines
 
+    def close(self):
+        pass
+
 
 def _collect_response(response):
     return "".join(

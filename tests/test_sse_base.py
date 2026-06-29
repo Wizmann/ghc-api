@@ -31,6 +31,9 @@ class _FakeResponse:
                 raise line
             yield line
 
+    def close(self):
+        pass
+
 
 def _collect(generator):
     """Drain a generator into a list."""
@@ -231,6 +234,9 @@ class SSEKeepaliveIntegrationTest(unittest.TestCase):
                 _time.sleep(0.25)
                 yield f"data: {message_start}".encode()
                 yield b"data: [DONE]"
+
+            def close(self):
+                pass
 
         handler = AnthropicDirectStreamHandler(
             response=_SlowResponse(),
