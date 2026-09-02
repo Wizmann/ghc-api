@@ -198,8 +198,8 @@ def refresh_copilot_token(force: bool = False) -> None:
             raise
 
 
-def fetch_models() -> None:
-    """Fetch available models from Copilot API"""
+def fetch_models() -> bool:
+    """Fetch available models from Copilot API and report whether it succeeded."""
     ensure_copilot_token()
     response = requests.get(
         f"{get_copilot_base_url()}/models",
@@ -213,8 +213,10 @@ def fetch_models() -> None:
         print(f"Loaded {len(state.models.get('data', []))} models")
         if updated_count:
             print(f"Added chat completions endpoint support to {updated_count} configured model(s)")
-    else:
-        print(f"Failed to fetch models: {response.status_code}")
+        return True
+
+    print(f"Failed to fetch models: {response.status_code}")
+    return False
 
 
 def ensure_copilot_token() -> None:
