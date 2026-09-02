@@ -1210,6 +1210,20 @@ def list_models():
 def list_models_full():
     return jsonify(state.models)
 
+
+@openai_bp.route("/v1/models/full/refresh", methods=["POST"])
+@openai_bp.route("/models/full/refresh", methods=["POST"])
+def refresh_models_full():
+    """Refresh the in-memory model cache and return the updated full listing."""
+    from ..api_helpers import fetch_models
+
+    try:
+        if not fetch_models():
+            return jsonify({"error": "Failed to fetch models from the Copilot API"}), 502
+        return jsonify(state.models)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
 @openai_bp.route("/v1/embeddings", methods=["POST"])
 @openai_bp.route("/embeddings", methods=["POST"])
 def embeddings():
