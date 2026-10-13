@@ -15,7 +15,11 @@ from ..auth import is_credential_header_name
 from ..utils import get_config_dir
 
 
-SUPPORTED_APIS = frozenset({"responses", "chat_completions", "messages"})
+SUPPORTED_APIS = frozenset({"responses", "chat_completions", "messages", "systemone"})
+# APIs that never produce an SSE stream. The decision API answers in a single
+# non-streaming JSON body, so a client 'stream' flag is rejected rather than
+# forwarded to an upstream that would reject it with an opaque 422.
+NON_STREAMING_APIS = frozenset({"systemone"})
 MODEL_REQUEST_MODES = frozenset({"preserve", "omit", "upstream"})
 MODEL_RESPONSE_MODES = frozenset({"preserve", "public"})
 AUTH_TYPES = frozenset({"none", "bearer_env", "bearer_command"})
@@ -325,6 +329,12 @@ def _parse_apis(value, field_name: str) -> Dict[str, ProxyApiConfig]:
         if response_model not in MODEL_RESPONSE_MODES:
             raise ProxyConfigError(
                 f"'{field_name}.{api_name}.response_model' must be one of: {', '.join(sorted(MODEL_RESPONSE_MODES))}"
+            )
+        if api_name == "systemone" and request_model == "omit":
+            # The decision API resolves the deployment from the request body, so
+            # dropping 'model' would make every upstream call fail.
+            raise ProxyConfigError(
+                f"'{field_name}.{api_name}.request_model' must be 'preserve' or 'upstream'"
             )
         apis[api_name] = ProxyApiConfig(
             name=api_name,

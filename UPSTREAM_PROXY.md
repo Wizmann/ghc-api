@@ -1,6 +1,6 @@
 # Configured Upstream Proxy
 
-The configured upstream proxy is an isolated, optional subsystem for forwarding OpenAI-compatible Responses and Chat Completions requests, plus native Anthropic Messages requests, to private or self-hosted gateways.
+The configured upstream proxy is an isolated, optional subsystem for forwarding OpenAI-compatible Responses and Chat Completions requests, native Anthropic Messages requests, and System One decision requests, to private or self-hosted gateways.
 
 It does not modify or share model routing with ghc-api's existing Copilot endpoints.
 
@@ -12,6 +12,7 @@ For a profile named `example-llm`:
 POST /proxy/example-llm/v1/responses
 POST /proxy/example-llm/v1/chat/completions
 POST /proxy/example-llm/v1/messages
+POST /proxy/example-llm/v1/systemone
 GET  /proxy/example-llm/v1/models
 GET  /proxy/models
 ```
@@ -20,7 +21,7 @@ GET  /proxy/models
 
 The existing `/v1/responses`, `/v1/chat/completions`, and `/v1/models` routes remain Copilot-only.
 
-The legacy text Completions API (`/v1/completions`) is not part of this feature. `chat_completions` refers to `/v1/chat/completions`. `messages` is native Anthropic Messages passthrough; it is not translated to or from an OpenAI protocol.
+The legacy text Completions API (`/v1/completions`) is not part of this feature. `chat_completions` refers to `/v1/chat/completions`. `messages` is native Anthropic Messages passthrough; it is not translated to or from an OpenAI protocol. `systemone` is native decision-API passthrough and is likewise untranslated.
 
 ## Private configuration
 
@@ -86,6 +87,13 @@ proxies:
         headers:
           anthropic-version: "2023-06-01"
           x-api-key: "${ANTHROPIC_API_KEY}"
+
+      systemone:
+        upstream_url: https://example.services.ai.azure.com/providers/microsoft/v1/systemone
+        request_model: upstream
+        response_model: public
+        headers:
+          api-key: "${EXAMPLE_DECISION_API_KEY}"
 
     models:
       example-coding-model:
@@ -255,8 +263,71 @@ Configured-proxy requests use the same request cache, request browser, in-memory
 - Responses: `input_tokens`, `output_tokens`, and `input_tokens_details.cached_tokens`.
 - Chat Completions: `prompt_tokens`, `completion_tokens`, and `prompt_tokens_details.cached_tokens`.
 - Anthropic Messages: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens`.
+- System One: `input_tokens` and `output_tokens`.
 
 The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Messages-only models are also available in the built-in Chat page. Error responses are recorded with zero usage, matching the existing endpoints.
+
+## Native System One decisions
+
+The `systemone` API forwards decision requests without translation. A decision model does not generate text; it scores a closed set of options and returns a calibrated probability per option.
+
+```yaml
+proxies:
+  example-decision:
+    auth:
+      type: none
+    apis:
+      systemone:
+        upstream_url: https://example.services.ai.azure.com/providers/microsoft/v1/systemone
+        timeout_seconds: 60
+        request_model: upstream
+        response_model: public
+        headers:
+          api-key: "${EXAMPLE_DECISION_API_KEY}"
+    models:
+      microsoft-decision-1:
+        display_name: Microsoft Decision 1
+        context_window: 32000
+        apis:
+          systemone:
+            upstream_model: example-decision-deployment
+```
+
+Request and response bodies are passed through as-is:
+
+```json
+{
+  "model": "microsoft-decision-1",
+  "state": "The payment callback API returns 500 on every call.",
+  "questions": {
+    "team": {
+      "type": "choice",
+      "instructions": "Which team should handle this ticket?",
+      "criteria": {
+        "billing": "Charges, invoices, and refunds",
+        "engineering": "Bugs, errors, and outages"
+      }
+    }
+  }
+}
+```
+
+Behavioural notes:
+
+- **Non-streaming only.** A request with `"stream": true` is rejected with HTTP 400 `unsupported_stream` and never reaches the upstream.
+- **`request_model: omit` is rejected at config load.** The upstream resolves the deployment from the request body, so `model` must be `preserve` or `upstream`. With `upstream`, the public model id maps to the upstream deployment name.
+- `response_model: public` rewrites the top-level `model` in the response, which otherwise reports the underlying model (for example `microsoft-decision-1`) rather than the deployment.
+- Usage accounting reads the flat `usage.input_tokens` and `usage.output_tokens` fields. Decision models have no cache tiers, so cached-token counters stay at zero.
+- Question and answer bodies are not inspected, validated, or rewritten. Upstream validation errors (HTTP 422) are returned unchanged.
+- Decision models are excluded from the built-in `/chat` page because they return probabilities rather than messages. They still appear in `GET /proxy/models` and `GET /proxy/<profile>/v1/models` with `supported_endpoints: ["/systemone"]`.
+
+Calling it through ghc-api:
+
+```bash
+curl http://127.0.0.1:8313/proxy/example-decision/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{"model":"microsoft-decision-1","state":"...","questions":{...}}'
+```
 
 ## Native Anthropic Messages
 
