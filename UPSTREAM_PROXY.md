@@ -293,7 +293,7 @@ proxies:
             upstream_model: example-decision-deployment
 ```
 
-Request and response bodies are passed through as-is:
+Every field except `model` is forwarded unchanged in both directions. `model` follows the configured `request_model` and `response_model` rules, so with the profile above a client sends and receives the public id `microsoft-decision-1` while the upstream sees the deployment name `example-decision-deployment`. Use `request_model: preserve` and `response_model: preserve` for byte-equivalent model values.
 
 ```json
 {
@@ -316,7 +316,7 @@ Behavioural notes:
 
 - **Non-streaming only.** A request with `"stream": true` is rejected with HTTP 400 `unsupported_stream` and never reaches the upstream.
 - **`request_model: omit` is rejected at config load.** The upstream resolves the deployment from the request body, so `model` must be `preserve` or `upstream`. With `upstream`, the public model id maps to the upstream deployment name.
-- `response_model: public` rewrites the top-level `model` in the response, which otherwise reports the underlying model (for example `microsoft-decision-1`) rather than the deployment.
+- `response_model: public` matters here because the upstream reports the underlying model name in `model`, not the deployment name it was called with.
 - Usage accounting reads the flat `usage.input_tokens` and `usage.output_tokens` fields. Decision models have no cache tiers, so cached-token counters stay at zero.
 - Question and answer bodies are not inspected, validated, or rewritten. Upstream validation errors (HTTP 422) are returned unchanged.
 - Decision models are excluded from the built-in `/chat` page because they return probabilities rather than messages. They still appear in `GET /proxy/models` and `GET /proxy/<profile>/v1/models` with `supported_endpoints: ["/systemone"]`.
