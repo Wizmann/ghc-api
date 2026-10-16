@@ -14,7 +14,13 @@ from flask import Blueprint, Response, g, jsonify, request
 from ..auth import ANONYMOUS_USER_ID, redact_auth_headers, require_auth
 from ..cache import cache
 from ..proxy import ProxyRequestError, ProxyRuntime
-from ..proxy.config import ProxyApiConfig, ProxyModelApiConfig, ProxyModelConfig, ProxyProfileConfig
+from ..proxy.config import (
+    NON_STREAMING_APIS,
+    ProxyApiConfig,
+    ProxyModelApiConfig,
+    ProxyModelConfig,
+    ProxyProfileConfig,
+)
 from ..sse import (
     ProxyAnthropicMessagesStreamHandler,
     ProxyChatCompletionsStreamHandler,
@@ -152,6 +158,15 @@ def _usage_for_api(api_name: str, result) -> Tuple[int, int, int, int]:
             usage.get("cache_creation_input_tokens", 0),
             usage.get("cache_read_input_tokens", 0),
         )
+    if api_name == "systemone":
+        # The decision API reports flat token counts and has no cache tiers.
+        # Output tokens are the scoring tokens only; they are often 0.
+        return (
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            0,
+            0,
+        )
     details = usage.get("prompt_tokens_details", {}) or {}
     return (
         usage.get("prompt_tokens", 0),
@@ -272,10 +287,20 @@ def _handle_proxy_request(profile_name: str, api_name: str):
     client_ip = get_client_ip(request)
     user_id = _current_user_id()
     use_streaming = bool(payload.get("stream", False))
+    if use_streaming and api_name in NON_STREAMING_APIS:
+        return _error(
+            "This API does not support streaming responses.",
+            "unsupported_stream",
+            400,
+            "stream",
+            api_name=api_name,
+            client_headers=client_headers,
+        )
     api_paths = {
         "responses": "responses",
         "chat_completions": "chat/completions",
         "messages": "messages",
+        "systemone": "systemone",
     }
     endpoint = f"/proxy/{profile_name}/v1/{api_paths[api_name]}"
 
@@ -410,6 +435,12 @@ def proxy_messages(profile_name: str):
     return _handle_proxy_request(profile_name, "messages")
 
 
+@proxy_bp.route("/proxy/<profile_name>/v1/systemone", methods=["POST"])
+def proxy_systemone(profile_name: str):
+    """Decision/System One passthrough (Microsoft-Decision-1 and compatible models)."""
+    return _handle_proxy_request(profile_name, "systemone")
+
+
 def _model_data(
     profile_name: str,
     profile: ProxyProfileConfig,
@@ -423,6 +454,8 @@ def _model_data(
         supported_endpoints.append("/chat/completions")
     if model.api_config("messages") is not None and "messages" in profile.apis:
         supported_endpoints.append("/messages")
+    if model.api_config("systemone") is not None and "systemone" in profile.apis:
+        supported_endpoints.append("/systemone")
     if not supported_endpoints:
         return None
 

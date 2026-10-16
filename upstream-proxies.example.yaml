@@ -98,3 +98,35 @@ proxies:
           messages:
             enabled: true
             upstream_model: claude-sonnet-4-5
+
+  # Decision / System One passthrough (Microsoft-Decision-1 and compatible
+  # models). A decision model returns calibrated probabilities instead of text,
+  # so it is intentionally absent from the built-in Chat page model list.
+  example-decision:
+    enabled: true
+
+    auth:
+      type: none
+
+    apis:
+      # Non-streaming only. request_model must not be 'omit' because the
+      # upstream resolves the deployment from the request body.
+      systemone:
+        enabled: true
+        upstream_url: https://gateway.example.test/providers/microsoft/v1/systemone
+        timeout_seconds: 60
+        request_model: upstream
+        response_model: public
+        headers:
+          api-key: "${EXAMPLE_DECISION_API_KEY}"
+
+    models:
+      microsoft-decision-1:
+        display_name: Microsoft Decision 1
+        input: [text]
+        context_window: 32000
+        apis:
+          systemone:
+            enabled: true
+            # The Foundry deployment name, not the catalog model name.
+            upstream_model: example-decision-deployment
