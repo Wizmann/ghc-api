@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 import uuid
@@ -312,6 +313,41 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
             path.unlink()
             self.assertIsNone(registry.get_profile("demo-profile"))
             self.assertIsNone(registry.last_error)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+class ShippedProxyExampleTest(unittest.TestCase):
+    """The shipped examples are copy-paste starting points, so they must parse.
+
+    A model that omits an API from its 'apis' mapping still enables that API,
+    which makes it easy for an example to enable a profile API that no model
+    maps. These tests catch that before users do.
+    """
+
+    def _profile_configs(self, text: str):
+        for block in re.findall(r"```yaml\n(.*?)```", text, re.DOTALL):
+            data = __import__("yaml").safe_load(block)
+            if isinstance(data, dict) and data.get("proxies"):
+                yield block, data
+
+    def test_example_config_file_parses(self):
+        path = REPO_ROOT / "upstream-proxies.example.yaml"
+        data = __import__("yaml").safe_load(path.read_text(encoding="utf-8"))
+        snapshot = parse_proxy_config(data)
+        self.assertTrue(snapshot.profiles)
+
+    def test_documented_profile_examples_parse(self):
+        text = (REPO_ROOT / "UPSTREAM_PROXY.md").read_text(encoding="utf-8")
+        blocks = list(self._profile_configs(text))
+        self.assertTrue(blocks, "UPSTREAM_PROXY.md has no full profile examples")
+        for block, data in blocks:
+            with self.subTest(profiles=sorted(data["proxies"])):
+                try:
+                    parse_proxy_config(data)
+                except ProxyConfigError as exc:
+                    self.fail(f"documented example is invalid: {exc}\n{block}")
 
 
 class ConfiguredProxyAffinityTest(unittest.TestCase):

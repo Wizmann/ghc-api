@@ -88,13 +88,6 @@ proxies:
           anthropic-version: "2023-06-01"
           x-api-key: "${ANTHROPIC_API_KEY}"
 
-      systemone:
-        upstream_url: https://example.services.ai.azure.com/providers/microsoft/v1/systemone
-        request_model: upstream
-        response_model: public
-        headers:
-          api-key: "${EXAMPLE_DECISION_API_KEY}"
-
     models:
       example-coding-model:
         display_name: Example Coding Model
@@ -114,6 +107,10 @@ proxies:
 ```
 
 Profile names may contain only letters, digits, `.`, `_`, and `-`.
+
+The example above does not enable the `systemone` API; decision models normally live in their own profile, shown under [Native System One decisions](#native-system-one-decisions).
+
+A model that omits an entry from its `apis` mapping still enables that API with no `upstream_model`, so every API enabled on the profile must either be mapped by the model or disabled with `enabled: false` on it. Enabling an API with `request_model: upstream` while a model leaves its `upstream_model` unset is rejected at config load.
 
 ## Authentication
 
