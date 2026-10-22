@@ -129,6 +129,13 @@ class State:
         # dumps, this is the only untruncated record of a search.
         self.log_webiq_requests: bool = True
 
+        # Independent key-only AnySearch native API and Chat tool.
+        self.enable_anysearch: bool = False
+        self.anysearch_api_key: str = ""
+        self.anysearch_base_url: str = "https://api.anysearch.com"
+        self.anysearch_timeout: int = 30
+        self.log_anysearch_requests: bool = True
+
         # User authentication settings
         # When True, /v1/chat/completions, /v1/messages, /v1/responses,
         # /v1/embeddings, and /v1/models require an approved user token.
