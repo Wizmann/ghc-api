@@ -31,10 +31,11 @@ function element() {
     return el;
 }
 const elements = {};
-for (const name of ['model-select', 'endpoint-select', 'web-search-enabled',
-    'web-search-toggle', 'webiq-search-enabled', 'webiq-search-toggle', 'messages-container']) {
+for (const name of ['model-select', 'endpoint-select', 'search-provider', 'messages-container']) {
     elements[name] = element();
 }
+elements['search-provider'].options = ['off', 'native', 'webiq', 'anysearch'].map(value => ({value}));
+elements['search-provider'].value = 'off';
 const document = {
     getElementById(name) { return elements[name]; },
     createElement() { return element(); },
@@ -90,7 +91,7 @@ vm.runInContext(script, sandbox);
     elements['model-select'].value = key;
     vm.runInContext('updateEndpointOptions()', sandbox);
     assert.equal(vm.runInContext('shouldUseMessages(document.getElementById("model-select").value)', sandbox), true);
-    assert.equal(vm.runInContext('canUseWebIq(document.getElementById("model-select").value)', sandbox), true);
+    assert.equal(vm.runInContext('canUseSearchProvider(document.getElementById("model-select").value, "webiq")', sandbox), true);
     const endpoints = elements['endpoint-select'].children.map(e => e.value);
     assert.deepEqual(endpoints, ['auto', '/proxy/example-profile/v1/messages']);
     assert.equal(vm.runInContext('resolveEndpoint({model:"example-model"})', sandbox),
@@ -142,7 +143,7 @@ vm.runInContext(script, sandbox);
         {type:'content_block_stop', index:2},
         {type:'message_stop'},
     ].map(frame).join('');
-    elements['webiq-search-enabled'].checked = true;
+    elements['search-provider'].value = 'webiq';
     vm.runInContext('executeWebIqCall = async args => ({ results: [], output: JSON.stringify({ query: JSON.parse(args).query, hits: 1 }) })', sandbox);
     responseStreams = [toolStream, normalSse];
     const toolSession = { messages: [{ role: 'user', content: 'search news' }] };

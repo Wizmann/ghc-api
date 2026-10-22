@@ -13,6 +13,7 @@ from .routes.dashboard import dashboard_bp
 from .routes.openai import openai_bp
 from .routes.proxy import proxy_bp
 from .routes.webiq import webiq_bp
+from .routes.anysearch import anysearch_bp
 from .state import state
 
 
@@ -41,6 +42,9 @@ PROTECTED_PATHS = frozenset({
     "/v3/search/images",
     "/v3/search/classic",
     "/v3/mcp",
+    # AnySearch also spends a server-held key; never expose it anonymously
+    # when ghc-api's user authentication is enabled.
+    "/v1/search",
 })
 
 
@@ -117,6 +121,7 @@ def create_app() -> Flask:
     app.register_blueprint(agent_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(webiq_bp)
+    app.register_blueprint(anysearch_bp)
 
     # Error handlers
     @app.errorhandler(404)
