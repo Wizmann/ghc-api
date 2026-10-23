@@ -279,10 +279,12 @@ def _handle_proxy_request(profile_name: str, api_name: str):
 
     original_request_body = copy.deepcopy(payload)
     request_id = str(uuid.uuid4())
-    client_header_names = {name.lower() for name in client_headers}
+    omitted_header_names = {name.lower() for name in client_headers}
+    if profile.auth.type == "header_command":
+        omitted_header_names.add(profile.auth.header.lower())
     request_headers = {
         name: value for name, value in redact_auth_headers(dict(request.headers)).items()
-        if name.lower() not in client_header_names
+        if name.lower() not in omitted_header_names
     }
     client_ip = get_client_ip(request)
     user_id = _current_user_id()

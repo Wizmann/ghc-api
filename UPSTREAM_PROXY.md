@@ -143,7 +143,22 @@ auth:
 
 The command is executed directly without a shell. Its trimmed stdout is used as the token. A non-zero exit code or empty stdout fails only the affected proxy request. Tokens are never placed in the request cache or returned by the model-list endpoint.
 
-A 401 response invalidates a command-backed token and retries once.
+### Custom header from a command
+
+Use `header_command` for upstreams that require a credential in a custom header without a `Bearer` prefix:
+
+```yaml
+auth:
+  type: header_command
+  header: api-key
+  command:
+    - cat
+    - /path/to/private-key.txt
+```
+
+`header` is required and must be a valid HTTP header name (no whitespace, colons, or control characters). It does not default to `Authorization`; specify that name explicitly if the upstream expects a raw Authorization value. A client-supplied header with this name is omitted from cached request headers; it is not used as the upstream credential.
+
+Both command auth types use the same command execution, token cache, and timeout settings. A 401 response invalidates a command-backed token and retries once. A second 401 is returned without another retry.
 
 ## Headers
 
@@ -154,11 +169,13 @@ Outbound headers are merged in this order:
 3. API `headers`
 4. Model `headers`
 5. Model API `headers`
-6. Upstream authentication
-7. Dynamic header bindings
-8. Affinity header
+6. Dynamic header bindings
+7. Affinity header
+8. Upstream authentication
 
-Later values override earlier values, case-insensitively for steps 7 and 8. Empty string values are preserved.
+Later values override earlier values, case-insensitively for steps 6–8. Authentication is applied last: a binding or affinity header with the same name cannot replace the credential. Use distinct names if the upstream needs both authentication and routing values.
+
+Empty string values are preserved. Static headers replaced by upstream authentication or dynamic bindings do not require their `${ENV_VAR}` placeholders to be set.
 
 Header values support `${ENV_VAR}` interpolation:
 
