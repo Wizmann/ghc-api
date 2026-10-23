@@ -51,7 +51,7 @@ def _merge_headers(*header_sets: Dict[str, str], overridden_names: Optional[set]
     merged: Dict[str, str] = {"Content-Type": "application/json"}
     for headers in header_sets:
         for name, value in headers.items():
-            # A dynamic value replaces this header entirely; do not resolve an
+            # A runtime value replaces this header entirely; do not resolve an
             # unused environment placeholder that could fail the request.
             if overridden_names and name.lower() in overridden_names:
                 continue
@@ -113,11 +113,14 @@ class ProxyRuntime:
         affinity_token: Optional[str],
         dynamic_headers: Dict[str, str],
     ) -> Dict[str, str]:
+        token = auth_provider.get_token()
+        overridden_names = {name.lower() for name in dynamic_headers}
+        if token:
+            overridden_names.add(profile.auth.header.lower())
         headers = _merge_headers(
             profile.headers, api.headers, model.headers, model_api.headers,
-            overridden_names={name.lower() for name in dynamic_headers},
+            overridden_names=overridden_names,
         )
-        token = auth_provider.get_token()
         if token:
             value = token if profile.auth.type == "header_command" else f"Bearer {token}"
             _set_header(headers, profile.auth.header, value)

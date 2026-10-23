@@ -447,8 +447,8 @@ class ConfiguredProxyAuthTest(unittest.TestCase):
                     }
                     if auth_type == "header_command":
                         raw_profile["auth"]["header"] = header
-                    # Auth must replace a static header even with different casing.
-                    raw_profile["headers"][header.upper()] = "stale-token"
+                    # An overridden credential must not require its old environment variable.
+                    raw_profile["headers"][header.upper()] = "${GHC_API_TEST_OLD_AUTH_KEY}"
                     profile = parse_proxy_config(config).profiles["demo-profile"]
                     api, model, model_api = profile.resolve("responses", "demo-model")
                     runtime = ProxyRuntime()
@@ -460,7 +460,8 @@ class ConfiguredProxyAuthTest(unittest.TestCase):
                         mock.Mock(returncode=0, stdout="token-two\n", stderr=""),
                     ]
 
-                    with mock.patch("ghc_api.proxy.auth.subprocess.run", side_effect=command_results) as run, \
+                    with mock.patch.dict("os.environ", {}, clear=True), \
+                            mock.patch("ghc_api.proxy.auth.subprocess.run", side_effect=command_results) as run, \
                             mock.patch("ghc_api.proxy.client.requests.post", side_effect=[unauthorized, final]) as post:
                         result = runtime.post(
                             profile, api, model, model_api, {"model": "demo-model"}, False,
@@ -518,6 +519,41 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.temp_dir.cleanup()
         state.enable_auth = self.saved_enable_auth
         self._reset_request_cache()
+
+    def test_custom_auth_header_is_not_cached_or_taken_from_client(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        config["proxies"]["demo-profile"]["auth"] = {
+            "type": "header_command", "header": "X-Vendor-Key",
+            "command": ["credential-helper"],
+        }
+        self.runtime.registry.path.write_text(__import__("yaml").safe_dump(config), encoding="utf-8")
+        completed = mock.Mock(returncode=0, stdout="server-credential\n", stderr="")
+
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                self._reset_request_cache()
+                upstream = FakeResponse(
+                    payload={"type": "message", "content": []},
+                    headers={"Content-Type": "text/event-stream" if stream else "application/json"},
+                    lines=[b'event: message_stop', b'data: {"type":"message_stop"}'],
+                )
+                with mock.patch("ghc_api.proxy.auth.subprocess.run", return_value=completed), \
+                        mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream) as post:
+                    with self.app.test_client() as client:
+                        response = client.post(
+                            "/proxy/demo-profile/v1/messages",
+                            json={"model": "demo-model", "messages": [], "max_tokens": 16, "stream": stream},
+                            headers={"x-vendor-key": "client-credential", "X-Trace-Id": "trace-1"},
+                        )
+                        response.get_data()  # Drain SSE so its cache entry is finalized.
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(post.call_args.kwargs["headers"]["X-Vendor-Key"], "server-credential")
+                cached = next(iter(cache.cache.values()))
+                self.assertNotIn("x-vendor-key", {name.lower() for name in cached["request_headers"]})
+                self.assertEqual(cached["request_headers"]["X-Trace-Id"], "trace-1")
+                self.assertNotIn("client-credential", json.dumps(cached))
+                self.assertNotIn("server-credential", json.dumps(cached))
 
     def test_responses_proxy_omits_model_rewrites_response_and_reuses_affinity(self):
         first = FakeResponse(

@@ -156,7 +156,7 @@ auth:
     - /path/to/private-key.txt
 ```
 
-`header` is required and must be a valid HTTP header name (no whitespace, colons, or control characters). It does not default to `Authorization`; specify that name explicitly if the upstream expects a raw Authorization value.
+`header` is required and must be a valid HTTP header name (no whitespace, colons, or control characters). It does not default to `Authorization`; specify that name explicitly if the upstream expects a raw Authorization value. A client-supplied header with this name is omitted from cached request headers; it is not used as the upstream credential.
 
 Both command auth types use the same command execution, token cache, and timeout settings. A 401 response invalidates a command-backed token and retries once. A second 401 is returned without another retry.
 
@@ -173,7 +173,7 @@ Outbound headers are merged in this order:
 7. Dynamic header bindings
 8. Affinity header
 
-Later values override earlier values, case-insensitively for steps 6–8. Empty string values are preserved.
+Later values override earlier values, case-insensitively for steps 6–8. Empty string values are preserved. Static headers replaced by upstream authentication or dynamic bindings do not require their `${ENV_VAR}` placeholders to be set.
 
 Header values support `${ENV_VAR}` interpolation:
 
