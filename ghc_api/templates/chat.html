@@ -513,36 +513,8 @@
             background: #f0f0f0;
         }
 
-        .web-search-toggle {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.35rem;
-            padding: 0.3rem 0.55rem;
-            border: 1px solid #ddd;
-            border-radius: 6px;
-            background: #fff;
-            color: #555;
-            font-size: 0.75rem;
-            cursor: pointer;
-            user-select: none;
-        }
-
-        .web-search-toggle input {
-            accent-color: #667eea;
-            cursor: pointer;
-        }
-
-        .web-search-toggle.unavailable {
-            opacity: 0.45;
-            cursor: not-allowed;
-        }
-
-        .web-search-toggle.unavailable input {
-            cursor: not-allowed;
-        }
-
-        .endpoint-select {
-            display: none;
+        .endpoint-select,
+        .search-provider-select {
             padding: 0.35rem 0.5rem;
             border: 1px solid #ddd;
             border-radius: 6px;
@@ -552,7 +524,24 @@
             font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         }
 
-        .endpoint-select:focus {
+        /* Only the endpoint selector is Raw-only. Search stays visible in
+           both modes, and its disabled state is controlled by availability. */
+        .endpoint-select {
+            display: none;
+        }
+
+        .search-provider-select {
+            display: inline-block;
+            cursor: pointer;
+        }
+
+        .search-provider-select:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
+        .endpoint-select:focus,
+        .search-provider-select:focus {
             outline: none;
             border-color: #667eea;
         }
@@ -668,8 +657,8 @@
                     <button id="mode-chat" class="active" onclick="setRawMode(false)">Chat</button>
                     <button id="mode-raw" onclick="setRawMode(true)">Raw</button>
                 </div>
-                <label class="web-search-toggle" for="search-provider">Search</label>
-                <select class="endpoint-select" id="search-provider" onchange="onSearchProviderChange()"
+                <label for="search-provider">Search</label>
+                <select class="search-provider-select" id="search-provider" onchange="onSearchProviderChange()"
                         title="Choose one search provider; no automatic fallback">
                     <option value="off">Off</option>
                     <option value="native">Native</option>
