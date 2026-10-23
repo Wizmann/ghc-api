@@ -20,6 +20,8 @@ const calls = [];
 let streams = [];
 let searchReply;
 let searchFailure;
+let toolReplies = {};
+let toolSequence = 0;
 function jsonReply(body, status = 200) {return {ok: status === 200, status, json: async () => body};}
 const successBody = {code: 0, data: {results: [
     {title: '', url: 'https://example.com/one', snippet: 'summary'},
@@ -35,10 +37,10 @@ function sseReply(text) {
     }}}}};
 }
 async function fetch(url, options) {
-    calls.push({url, body: JSON.parse(options.body), signal: options.signal});
-    if (url === '/v1/search') {
+    calls.push({url, method: options.method, body: options.body ? JSON.parse(options.body) : null, signal: options.signal});
+    if (url === '/v1/search' || url === '/v1/extract' || url.startsWith('/v1/sub-domains?')) {
         if (searchFailure) throw searchFailure;
-        return searchReply;
+        return toolReplies[url.split('?')[0]] || searchReply;
     }
     assert.notEqual(url, '/v3/search/web', 'AnySearch must never fall back to Web IQ');
     assert.ok(streams.length, 'unexpected model call');
@@ -46,7 +48,7 @@ async function fetch(url, options) {
 }
 const sandbox = {document: {getElementById: id => elements[id], createElement: element},
     localStorage: {getItem: key => saved[key] ?? null, setItem: (key, value) => {saved[key] = value;}},
-    fetch, TextDecoder, performance, console, URL, window: {location: {origin: 'https://proxy.test'}},
+    fetch, TextDecoder, performance, console, URL, URLSearchParams, window: {location: {origin: 'https://proxy.test'}},
     crypto: require('node:crypto').webcrypto};
 vm.createContext(sandbox);
 vm.runInContext(source, sandbox);
@@ -55,26 +57,28 @@ vm.runInContext(`modelTargets.m = {id:'gpt-test', type:'copilot', baseUrl:'/v1',
     abortController = {signal: {testSignal:true}};`, sandbox);
 const run = expr => vm.runInContext(expr, sandbox);
 const frame = data => 'data: ' + JSON.stringify(data) + '\n\n';
-function toolStream(style, name = 'anysearch_search') {
+function toolStream(style, name = 'anysearch_search', argumentsJson = '{"query":"news"}') {
+    const itemId = name + '_' + (++toolSequence);
+    const callId = 'call_' + itemId;
     if (style === 'messages') return [
         {type:'message_start', message:{content:[]}},
-        {type:'content_block_start', index:0, content_block:{type:'tool_use', id:'call_1', name, input:{}}},
-        {type:'content_block_delta', index:0, delta:{type:'input_json_delta', partial_json:'{"query":'}},
-        {type:'content_block_delta', index:0, delta:{type:'input_json_delta', partial_json:'"news"}'}},
+        {type:'content_block_start', index:0, content_block:{type:'tool_use', id:callId, name, input:{}}},
+        {type:'content_block_delta', index:0, delta:{type:'input_json_delta', partial_json:argumentsJson.slice(0, 4)}},
+        {type:'content_block_delta', index:0, delta:{type:'input_json_delta', partial_json:argumentsJson.slice(4)}},
         {type:'content_block_stop', index:0}, {type:'message_stop'},
     ].map(frame).join('');
     if (style === 'responses') {
-        const item = {type:'function_call', id:'fc_1', call_id:'call_1', name, arguments:'{"query":"news"}'};
+        const item = {type:'function_call', id:'fc_' + itemId, call_id:callId, name, arguments:argumentsJson};
         return [
-            {type:'response.output_item.done', item:{type:'reasoning', id:'reason_1', summary:[]}},
+            {type:'response.output_item.done', item:{type:'reasoning', id:'reason_' + itemId, summary:[]}},
             {type:'response.output_item.done', item},
             {type:'response.completed', response:{output:[item]}}, // must dedupe
         ].map(frame).join('');
     }
     return [
-        {choices:[{delta:{tool_calls:[{index:0, id:'call_1', type:'function',
-            function:{name:name.slice(0, 4), arguments:'{"query":'}}]}}]},
-        {choices:[{delta:{tool_calls:[{index:0, function:{name:name.slice(4), arguments:'"news"}'}}]}}]},
+        {choices:[{delta:{tool_calls:[{index:0, id:callId, type:'function',
+            function:{name:name.slice(0, 4), arguments:argumentsJson.slice(0, 4)}}]}}]},
+        {choices:[{delta:{tool_calls:[{index:0, function:{name:name.slice(4), arguments:argumentsJson.slice(4)}}]}}]},
     ].map(frame).join('') + 'data: [DONE]\n\n';
 }
 function finalStream(style) {
@@ -95,6 +99,8 @@ function reset() {
     streams = [];
     searchReply = jsonReply(successBody);
     searchFailure = null;
+    toolReplies = {};
+    toolSequence = 0;
     elements['search-provider'].value = 'anysearch';
 }
 async function turn(style) {
@@ -120,7 +126,7 @@ async function turn(style) {
         elements['search-provider'].value = provider;
         for (const style of ['chat', 'responses', 'messages']) {
             const tools = run(`searchTools('m', '${style}')`);
-            assert.equal(tools.length, 1);
+            assert.equal(tools.length, provider === 'webiq' ? 1 : 3);
             assert.equal(tools[0].function?.name || tools[0].name, provider === 'webiq' ? 'webiq_search' : 'anysearch_search');
         }
     }
@@ -177,7 +183,106 @@ async function turn(style) {
     await assert.rejects(() => run('executeAnySearchCall')('{"query":"q"}'), {name:'AbortError'});
     assert.equal(calls.length, 1);
 
+    const catalogBody = {code:0, data:{domains:[{domain:'code', sub_domains:[{
+        sub_domain:'code.doc', params:{library:{description:'Library name', required:true, sort_order:0}},
+    }]}]}};
+    const extractBody = {code:0, data:{url:'https://example.com/one', title:'Read source', content:'x'.repeat(13000)}};
+    for (const [name, args, body] of [
+        ['anysearch_extract', {url:'https://example.com/one'}, extractBody],
+        ['anysearch_sub_domains', {domain:['code', 'finance']}, catalogBody],
+    ]) {
+        reset();
+        searchReply = jsonReply(body);
+        const result = await run('executeAnySearchCall')(JSON.stringify(args), name);
+        const parsed = JSON.parse(result.output);
+        assert.ok(!parsed.error);
+        if (name === 'anysearch_extract') {
+            assert.equal(calls[0].url, '/v1/extract');
+            assert.equal(calls[0].method, 'POST');
+            assert.equal(parsed.content.length, 12000);
+            assert.equal(parsed.truncated, true);
+            assert.equal(result.results[0].url, args.url);
+        } else {
+            assert.equal(calls[0].url, '/v1/sub-domains?domain=code&domain=finance');
+            assert.equal(calls[0].method, 'GET');
+            assert.equal(calls[0].body, null);
+            assert.equal(parsed.domains[0].sub_domains[0].params.library.required, true);
+            assert.match(parsed.note, /not DNS/);
+            assert.equal(result.results.length, 0);
+        }
+        reset();
+        searchReply = {ok:false, status:402, json() {throw new Error('must not read 402');}};
+        assert.match((await run('executeAnySearchCall')(JSON.stringify(args), name)).output, /HTTP 402/);
+        reset();
+        searchFailure = Object.assign(new Error('cancelled'), {name:'AbortError'});
+        await assert.rejects(() => run('executeAnySearchCall')(JSON.stringify(args), name), {name:'AbortError'});
+        assert.equal(calls.length, 1);
+        reset();
+        elements['search-provider'].value = 'webiq';
+        await assert.rejects(() => run('executeSearchCall')(name, JSON.stringify(args), run("searchTools('m', 'responses')")),
+            /Unsupported search tool call/);
+        assert.equal(calls.length, 0);
+    }
+    for (const [name, args] of [['anysearch_extract', {}], ['anysearch_extract', {url:4}],
+        ['anysearch_extract', {url:'https://example.com', format:'markdown'}],
+        ['anysearch_sub_domains', {domain:'code'}], ['anysearch_sub_domains', {domain:[]}],
+        ['anysearch_sub_domains', {domain:['code', null]}], ['anysearch_sub_domains', {domains:['code']}],
+        ['anysearch_search', {query:'q', params:[]}], ['anysearch_search', {query:'q', zone:'bad'}]]) {
+        reset();
+        assert.ok(JSON.parse((await run('executeAnySearchCall')(JSON.stringify(args), name)).output).error);
+        assert.equal(calls.length, 0);
+    }
+    for (const [name, body] of [['anysearch_extract', {code:0, data:{url:'u', title:'t'}}],
+        ['anysearch_sub_domains', {code:0, data:{domains:[null]}}]]) {
+        reset();
+        searchReply = jsonReply(body);
+        const args = name === 'anysearch_extract' ? {url:'https://example.com'} : {domain:['code']};
+        assert.ok(JSON.parse((await run('executeAnySearchCall')(JSON.stringify(args), name)).output).error);
+    }
+
     for (const style of ['messages', 'responses', 'chat']) {
+        // Capability discovery -> tagged search -> read a source -> answer.
+        reset();
+        toolReplies = {'/v1/sub-domains':jsonReply(catalogBody), '/v1/extract':jsonReply(extractBody)};
+        streams = [
+            toolStream(style, 'anysearch_sub_domains', '{"domain":["code","finance"]}'),
+            toolStream(style, 'anysearch_search', '{"query":"q","tag":"code.doc","params":{"library":"golang"},"zone":"intl","language":"en"}'),
+            toolStream(style, 'anysearch_extract', '{"url":"https://example.com/one"}'),
+            finalStream(style),
+        ];
+        const pipeline = await turn(style);
+        assert.equal(pipeline.text, 'OK');
+        assert.deepEqual(Array.from(pipeline.toolCalls, c => c.name),
+            ['anysearch_sub_domains', 'anysearch_search', 'anysearch_extract']);
+        assert.equal(pipeline.sources.length, 3, 'extract citation must dedupe the existing source URL');
+        assert.equal(new Set(pipeline.toolCalls.map(c => c.id)).size, 3, 'tool call IDs must remain distinct');
+        sandbox.pipelineMessages = [{role:'user', content:'research'}, {role:'assistant', content:pipeline.text,
+            toolCalls:pipeline.toolCalls, nativeMessages:pipeline.nativeMessages}, {role:'user', content:'follow up'}];
+        const replay = run(style === 'messages' ? 'buildAnthropicMessages(pipelineMessages)' :
+            style === 'responses' ? 'buildResponsesInput(pipelineMessages)' : 'buildChatMessages(pipelineMessages)');
+        for (const name of ['anysearch_sub_domains', 'anysearch_search', 'anysearch_extract']) {
+            assert.ok(JSON.stringify(replay).includes(name), 'missing tool in history: ' + name);
+        }
+        assert.match(JSON.stringify(replay), /sort_order/);
+        const tagged = calls.find(c => c.url === '/v1/search').body;
+        assert.equal(tagged.tag, 'code.doc');
+        assert.deepEqual(tagged.params, {library:'golang'});
+        assert.equal(tagged.zone, 'intl');
+        assert.equal(tagged.language, 'en');
+        assert.equal(tagged.format, 'markdown');
+        assert.match(pipeline.toolCalls[0].output, /sort_order/);
+        assert.equal(JSON.parse(pipeline.toolCalls[2].output).truncated, true);
+        assert.equal(calls.filter(c => c.url.startsWith('/v1/sub-domains?')).length, 1);
+        assert.equal(calls.filter(c => c.url === '/v1/extract').length, 1);
+        const finalChoice = calls.at(-1).body.tool_choice;
+        assert.equal(finalChoice.type || finalChoice, 'none');
+        for (const name of ['anysearch_extract', 'anysearch_sub_domains']) {
+            reset();
+            const args = name === 'anysearch_extract' ? {url:'https://example.com'} : {domain:['code']};
+            searchReply = jsonReply({}, 422);
+            streams = [toolStream(style, name, JSON.stringify(args)), finalStream(style)];
+            assert.match((await turn(style)).toolCalls[0].output, /HTTP 422/);
+        }
         reset();
         streams = [toolStream(style), finalStream(style)];
         const answer = await turn(style);
@@ -189,7 +294,7 @@ async function turn(style) {
         const modelCalls = calls.filter(c => c.url !== '/v1/search');
         assert.equal(modelCalls.length, 2);
         assert.match(JSON.stringify(modelCalls[1].body), /Untrusted web content/);
-        if (style === 'responses') assert.match(JSON.stringify(modelCalls[1].body), /reason_1/);
+        if (style === 'responses') assert.match(JSON.stringify(modelCalls[1].body), /reason_anysearch_search_1/);
         sandbox.replayMessages = [{role:'user', content:'news'},
             {role:'assistant', content:answer.text, toolCalls:answer.toolCalls, nativeMessages:answer.nativeMessages},
             {role:'user', content:'follow-up'}];

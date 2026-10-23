@@ -277,8 +277,16 @@ def test_generated_config_has_safe_defaults(tmp_path, monkeypatch):
     assert not anysearch.is_configured(target)
 
 
-def test_tool_schema_is_narrow_but_native_api_is_not():
+def test_search_schema_supports_discovered_capability_parameters():
     chat = anysearch.tool_definition()
     responses = anysearch.tool_definition("responses")
     assert chat["function"]["name"] == responses["name"] == "anysearch_search"
-    assert set(responses["parameters"]["properties"]) == {"query", "max_results"}
+    assert set(responses["parameters"]["properties"]) == {
+        "query", "max_results", "tag", "params", "zone", "language", "format",
+    }
+    assert responses["parameters"]["required"] == ["query"]
+    tools = anysearch.tool_definitions("responses")
+    assert [t["name"] for t in tools] == ["anysearch_search", "anysearch_extract", "anysearch_sub_domains"]
+    assert tools[1]["parameters"]["required"] == ["url"]
+    assert tools[2]["parameters"]["properties"]["domain"]["type"] == "array"
+    assert "NOT DNS" in tools[2]["description"]

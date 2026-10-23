@@ -600,10 +600,21 @@ streaming MCP request and response bodies are never persisted.
 
 AnySearch is an independent second search provider alongside Web IQ:
 
-- `POST /v1/search` proxies the [native AnySearch Search API](https://www.anysearch.com/docs/api-endpoints/v1-search).
-- `/chat` offers **Off / Native / Web IQ / AnySearch** in its Search selector.
-  Existing Native/Web IQ preferences are migrated automatically. There is no
-  automatic provider fallback or simultaneous search.
+All three documented REST endpoints are proxied:
+
+| Endpoint | Purpose | Chat function tool |
+| --- | --- | --- |
+| [`POST /v1/search`](https://www.anysearch.com/docs/api-endpoints/v1-search) | Ranked search results | `anysearch_search` |
+| [`POST /v1/extract`](https://www.anysearch.com/docs/api-endpoints/v1-extract) | Clean content from a public HTTP(S) URL | `anysearch_extract` |
+| [`GET /v1/sub-domains`](https://www.anysearch.com/docs/api-endpoints/v1-sub-domains) | Search capability tags and parameter definitions | `anysearch_sub_domains` |
+
+**`sub-domains` is a capability catalog, not DNS subdomain discovery.** Its
+`domain` values are search categories such as `code` and `finance`, not website
+hostnames. It consumes no search quota and does not count as search usage.
+
+`/chat` offers **Off / Native / Web IQ / AnySearch** in its Search selector.
+Existing Native/Web IQ preferences are migrated automatically. There is no
+automatic provider fallback or simultaneous use of different providers.
 
 Configure it in `config.yaml`, then restart ghc-api:
 
@@ -614,6 +625,7 @@ anysearch_api_key: ""
 anysearch_api_key_file: "~/.config/ghc-api/secrets/anysearch_api_key"
 anysearch_base_url: "https://api.anysearch.com"
 anysearch_timeout: 30
+anysearch_extract_timeout: 60
 log_anysearch_requests: true
 ```
 
@@ -628,6 +640,12 @@ never anonymous traffic. No automatic retries, redirects, or key registration.
 curl -X POST http://localhost:8313/v1/search \
   -H 'Content-Type: application/json' \
   -d '{"query":"Python asyncio TaskGroup documentation","max_results":5}'
+
+curl -X POST http://localhost:8313/v1/extract \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/article"}'
+
+curl 'http://localhost:8313/v1/sub-domains?domain=code&domain=finance'
 ```
 
 With `enable_auth: true`, provide your **ghc-api user token**, not the provider
@@ -639,6 +657,21 @@ Native request bytes and normal responses are preserved, including `tag`,
 `zone`, `language`, `params`, `format`, and future fields. The proxy inserts no
 search defaults. `format: markdown` still returns a JSON envelope; result
 `content` is Markdown. Retry-After and X-Request-ID survive ordinary responses.
+
+Extract accepts exactly one JSON object with a nonempty `url` string: no unknown
+or duplicate fields, valid UTF-8, at most 16 KiB, `application/json` with no
+charset or UTF-8, and no Content-Encoding or `identity`. The proxy passes the
+bytes and content headers unchanged; **upstream validates this strict contract**
+and the public-URL policy. ghc-api never fetches the submitted URL locally.
+Ordinary extraction failures, including 422 and `error_code`, are preserved.
+
+For the capability catalog, repeat `domain` (`?domain=code&domain=finance`), not
+`domains` or a comma-separated list. Upstream deduplicates repeated values and
+returns an empty `data.domains` array for unknown domains. Query arguments are
+preserved, except ghc-api's client `api_key` parameter is stripped before
+forwarding or recording. All three endpoints require the server key and share
+ghc-api's optional user-token gate, even though catalog lookup is quota-free.
+
 Documented security exceptions:
 
 - Upstream 401/403 become safe 503 errors about the **server's** credentials/access.
@@ -648,23 +681,37 @@ Documented security exceptions:
 - Upstream redirects become safe 502 errors instead of being followed.
 - Timeout is 504; other network failure is 502. No exception details are exposed.
 
-Chat declares `anysearch_search(query, max_results)` as a normal function tool,
-executes the model's calls client-side, and returns results through Chat
-Completions, Responses, or Messages tool results. It does not change native
-upstream `web_search` tools. The UI requests five results and Markdown by default,
-limits result text for model context, marks truncation, and keeps citation URLs.
-Those are client policies, not API defaults. Search failures become safe tool
-outputs; unknown or unselected tools cannot execute.
+Selecting AnySearch in Chat declares all three tools. The model can discover
+capabilities, search with a returned tag and its required params, then extract a
+source before answering. `anysearch_search` accepts `query`, `max_results` and
+optional `tag`, `params`, `zone`, `language`, `format`; `anysearch_extract` takes
+`url`; `anysearch_sub_domains` takes a `domain` array. Tools execute client-side
+through Chat Completions, Responses, or Messages tool results, not by injecting
+hidden server-side searches into LLM requests. Native upstream `web_search`
+tools are unchanged.
 
-Requests appear in the shared request browser/statistics as `anysearch_search`
-with zero LLM tokens. Safe daily audit records go to
+The shared limit is three tool rounds per user turn, then a forced-answer round.
+The UI defaults to five search results and Markdown, clips search content to
+3000 characters, snippets to 1000, and extracted content to 12000, marking
+truncation. These are client context policies, not native API defaults. Web
+content is labeled untrusted and citation URLs survive. Catalog metadata does
+not create fake webpage citations. Failures become safe tool outputs;
+cancellation propagates, and unknown or unselected tools cannot execute.
+
+Requests appear in the shared request browser/statistics as `anysearch_search`,
+`anysearch_extract`, or `anysearch_sub_domains`, with zero LLM tokens. Capability
+lookups have separate counters and `uses_search_quota: false`; they do not
+increment search counters. Safe daily audit records go to
 `<ghc-api config dir>/anysearch/YYYY-MM-DD.jl`; `log_anysearch_requests` controls
 this dedicated file, not the shared cache. It can be toggled through
 `/api/runtime-config`. Business failures and malformed successes are marked as
 errors even if upstream used HTTP 200; the original HTTP contract is preserved.
 
-A CLI example is in `scripts/anysearch_search_demo.py` (use `GHC_API_TOKEN` for
-optional ghc-api user authentication). See the
+`scripts/anysearch_search_demo.py` supports the original positional search query,
+`--extract URL`, or repeated `--domain code --domain finance`. Use `--params` with
+a JSON object for tagged searches, and `GHC_API_TOKEN` for optional ghc-api user
+authentication. These are the three REST APIs; an AnySearch MCP proxy is not
+provided. See the
 [design and security decision](docs/decisions/ANYSEARCH_SEARCH_API.md) for details.
 
 ### Configured Upstream Proxy

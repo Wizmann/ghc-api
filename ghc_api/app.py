@@ -42,9 +42,11 @@ PROTECTED_PATHS = frozenset({
     "/v3/search/images",
     "/v3/search/classic",
     "/v3/mcp",
-    # AnySearch also spends a server-held key; never expose it anonymously
-    # when ghc-api's user authentication is enabled.
+    # AnySearch services share server-held credentials. Gate even the
+    # quota-free capability catalog when ghc-api user auth is enabled.
     "/v1/search",
+    "/v1/extract",
+    "/v1/sub-domains",
 })
 
 

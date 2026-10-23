@@ -460,7 +460,8 @@ def main():
         print(f"Web IQ v3 REST APIs: http://{host}:{port}/v3/")
         print(f"Web IQ MCP server: http://{host}:{port}/v3/mcp")
     if anysearch.is_configured(state):
-        print(f"AnySearch API: http://{host}:{port}/v1/search")
+        for path in anysearch.API_PATHS:
+            print(f"AnySearch API: http://{host}:{port}{path}")
 
     serve_app(app, host=host, port=port, debug=debug)
 

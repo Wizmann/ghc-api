@@ -303,9 +303,10 @@ log_webiq_requests: true
 
 # AnySearch (independent of Web IQ)
 # --------------------------------
-# Native POST /v1/search and the AnySearch option in /chat.
+# Native POST /v1/search, POST /v1/extract, GET /v1/sub-domains, and Chat tools.
+# sub-domains is a search capability catalog, NOT DNS subdomain discovery.
 # Key required: no anonymous requests, retries, or provider fallback.
-# https://www.anysearch.com/docs/api-endpoints/v1-search
+# https://www.anysearch.com/docs/api-endpoints
 # Configure either an inline key OR a private key file (not both).
 # Keep key files outside the repository with mode 0600.
 enable_anysearch: false
@@ -313,6 +314,8 @@ anysearch_api_key: ""
 anysearch_api_key_file: ""
 anysearch_base_url: "https://api.anysearch.com"
 anysearch_timeout: 30
+# Extract fetches page content and may need longer than search/catalog requests.
+anysearch_extract_timeout: 60
 # Safe daily audit under <config_dir>/anysearch/. All 402 responses are
 # replaced before logging, caching, or returning them to the caller.
 log_anysearch_requests: true
