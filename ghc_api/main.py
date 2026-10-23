@@ -16,7 +16,7 @@ import tempfile
 import traceback
 import yaml
 
-from . import __version__, webiq
+from . import __version__, webiq, anysearch
 from .anthropic_responses import WIRE_PROFILES
 from .api_helpers import resolve_ghe_endpoints
 from .app import create_app, initialize_app
@@ -369,6 +369,8 @@ def main():
         if 'log_webiq_requests' in config:
             state.log_webiq_requests = bool(config['log_webiq_requests'])
 
+        anysearch.apply_config(config, state)
+
         # Load user-token auth setting
         if 'enable_auth' in config:
             state.enable_auth = bool(config['enable_auth'])
@@ -457,6 +459,8 @@ def main():
     if webiq.is_configured(state):
         print(f"Web IQ v3 REST APIs: http://{host}:{port}/v3/")
         print(f"Web IQ MCP server: http://{host}:{port}/v3/mcp")
+    if anysearch.is_configured(state):
+        print(f"AnySearch API: http://{host}:{port}/v1/search")
 
     serve_app(app, host=host, port=port, debug=debug)
 

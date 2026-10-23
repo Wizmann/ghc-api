@@ -1,6 +1,6 @@
 # Configured Upstream Proxy
 
-The configured upstream proxy is an isolated, optional subsystem for forwarding OpenAI-compatible Responses and Chat Completions requests, plus native Anthropic Messages requests, to private or self-hosted gateways.
+The configured upstream proxy is an isolated, optional subsystem for forwarding OpenAI-compatible Responses and Chat Completions requests, native Anthropic Messages requests, and System One decision requests, to private or self-hosted gateways.
 
 It does not modify or share model routing with ghc-api's existing Copilot endpoints.
 
@@ -12,6 +12,7 @@ For a profile named `example-llm`:
 POST /proxy/example-llm/v1/responses
 POST /proxy/example-llm/v1/chat/completions
 POST /proxy/example-llm/v1/messages
+POST /proxy/example-llm/v1/systemone
 GET  /proxy/example-llm/v1/models
 GET  /proxy/models
 ```
@@ -20,7 +21,7 @@ GET  /proxy/models
 
 The existing `/v1/responses`, `/v1/chat/completions`, and `/v1/models` routes remain Copilot-only.
 
-The legacy text Completions API (`/v1/completions`) is not part of this feature. `chat_completions` refers to `/v1/chat/completions`. `messages` is native Anthropic Messages passthrough; it is not translated to or from an OpenAI protocol.
+The legacy text Completions API (`/v1/completions`) is not part of this feature. `chat_completions` refers to `/v1/chat/completions`. `messages` is native Anthropic Messages passthrough; it is not translated to or from an OpenAI protocol. `systemone` is native decision-API passthrough and is likewise untranslated.
 
 ## Private configuration
 
@@ -107,6 +108,10 @@ proxies:
 
 Profile names may contain only letters, digits, `.`, `_`, and `-`.
 
+The example above does not enable the `systemone` API; decision models normally live in their own profile, shown under [Native System One decisions](#native-system-one-decisions).
+
+A model that omits an entry from its `apis` mapping still enables that API with no `upstream_model`, so every API enabled on the profile must either be mapped by the model or disabled with `enabled: false` on it. Enabling an API with `request_model: upstream` while a model leaves its `upstream_model` unset is rejected at config load.
+
 ## Authentication
 
 ### No upstream authentication
@@ -138,7 +143,9 @@ auth:
 
 The command is executed directly without a shell. Its trimmed stdout is used as the token. A non-zero exit code or empty stdout fails only the affected proxy request. Tokens are never placed in the request cache or returned by the model-list endpoint.
 
-For upstreams that require a credential in a custom header, use `header_command` instead. The command output is sent as-is, without a `Bearer` prefix:
+### Custom header from a command
+
+Use `header_command` for upstreams that require a credential in a custom header without a `Bearer` prefix:
 
 ```yaml
 auth:
@@ -149,7 +156,9 @@ auth:
     - /path/to/private-key.txt
 ```
 
-A 401 response invalidates a command-backed token and retries once.
+`header` is required and must be a valid HTTP header name (no whitespace, colons, or control characters). It does not default to `Authorization`; specify that name explicitly if the upstream expects a raw Authorization value.
+
+Both command auth types use the same command execution, token cache, and timeout settings. A 401 response invalidates a command-backed token and retries once. A second 401 is returned without another retry.
 
 ## Headers
 
@@ -161,9 +170,10 @@ Outbound headers are merged in this order:
 4. Model `headers`
 5. Model API `headers`
 6. Upstream authentication
-7. Affinity header
+7. Dynamic header bindings
+8. Affinity header
 
-Later values override earlier values. Empty string values are preserved.
+Later values override earlier values, case-insensitively for steps 6–8. Empty string values are preserved.
 
 Header values support `${ENV_VAR}` interpolation:
 
@@ -172,7 +182,43 @@ headers:
   X-Tenant: "${PRIVATE_LLM_TENANT}"
 ```
 
-Incoming client headers are not forwarded. In particular, a ghc-api user token is never reused as an upstream credential.
+Incoming client headers are not forwarded, except for the names explicitly listed in `header_bindings` below. In particular, a ghc-api user token is never reused as an upstream credential.
+
+## Dynamic header bindings
+
+Forwarding a client-supplied header stays opt-in: an API config may declare `header_bindings`, and only those exact client header names are ever read from the incoming request.
+
+```yaml
+apis:
+  messages:
+    upstream_url: https://private-llm.example.com/v1/messages
+    header_bindings:
+      - client_name: X-Client-Session
+        upstream_name: X-Upstream-Session
+        value_type: uuid_v4
+```
+
+Fields, all required:
+
+- `client_name`: the header name read from the client request and echoed on the ghc-api response.
+- `upstream_name`: the header name sent upstream with the same value.
+- `value_type`: currently only `uuid_v4`.
+
+Behavior:
+
+- If the client sends `client_name`, the value must parse as a UUID version 4. It is normalized to canonical lower-case form, so a re-sent value keeps the same upstream session. An invalid value fails the request with HTTP 400 before any upstream call.
+- If the client omits the header, ghc-api generates a fresh UUID v4 per request.
+- The resolved value is returned to the client in `client_name` on success and on proxy-generated errors, so a client can capture it and reuse it.
+- The value replaces any static header of the same `upstream_name`, including a differently-cased spelling, and an unused `${ENV_VAR}` placeholder on that static header is not resolved.
+- `client_name` is omitted from the request cache, the request browser and exports; the upstream value is never published by `/proxy/models`.
+- `/proxy/models` publishes only the client-facing names for the built-in Chat page, as `request_headers: {"/messages": [{"name": ..., "value_type": ...}]}`.
+
+Validation rejects the configuration when:
+
+- a name is not a valid HTTP token, or is a structural header such as `host` or `content-type`;
+- a name is a credential header (for example `authorization`, `x-api-key`, `api-key`, `x-auth-token`, or any `*-api-key`, `*-auth-token`, `*-access-token`, `*-secret` name), using the same predicate that redacts credentials from the cache;
+- `client_name` and `upstream_name` are equal, or two bindings of one API overlap;
+- a name reuses the profile's affinity `request_header` or `response_header`, which would otherwise overwrite the affinity token.
 
 ## Model field handling
 
@@ -229,14 +275,77 @@ Configured-proxy requests use the same request cache, request browser, in-memory
 - Responses: `input_tokens`, `output_tokens`, and `input_tokens_details.cached_tokens`.
 - Chat Completions: `prompt_tokens`, `completion_tokens`, and `prompt_tokens_details.cached_tokens`.
 - Anthropic Messages: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens`.
+- System One: `input_tokens` and `output_tokens`.
 
-The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Messages is currently available through API clients rather than the built-in OpenAI-shaped Chat page. Error responses are recorded with zero usage, matching the existing endpoints.
+The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Messages-only models are also available in the built-in Chat page. Error responses are recorded with zero usage, matching the existing endpoints.
+
+## Native System One decisions
+
+The `systemone` API forwards decision requests without translation. A decision model does not generate text; it scores a closed set of options and returns a calibrated probability per option.
+
+```yaml
+proxies:
+  example-decision:
+    auth:
+      type: none
+    apis:
+      systemone:
+        upstream_url: https://example.services.ai.azure.com/providers/microsoft/v1/systemone
+        timeout_seconds: 60
+        request_model: upstream
+        response_model: public
+        headers:
+          api-key: "${EXAMPLE_DECISION_API_KEY}"
+    models:
+      microsoft-decision-1:
+        display_name: Microsoft Decision 1
+        context_window: 32000
+        apis:
+          systemone:
+            upstream_model: example-decision-deployment
+```
+
+Every field except `model` is forwarded unchanged in both directions. `model` follows the configured `request_model` and `response_model` rules, so with the profile above a client sends and receives the public id `microsoft-decision-1` while the upstream sees the deployment name `example-decision-deployment`. Use `request_model: preserve` and `response_model: preserve` for byte-equivalent model values.
+
+```json
+{
+  "model": "microsoft-decision-1",
+  "state": "The payment callback API returns 500 on every call.",
+  "questions": {
+    "team": {
+      "type": "choice",
+      "instructions": "Which team should handle this ticket?",
+      "criteria": {
+        "billing": "Charges, invoices, and refunds",
+        "engineering": "Bugs, errors, and outages"
+      }
+    }
+  }
+}
+```
+
+Behavioural notes:
+
+- **Non-streaming only.** A request with `"stream": true` is rejected with HTTP 400 `unsupported_stream` and never reaches the upstream.
+- **`request_model: omit` is rejected at config load.** The upstream resolves the deployment from the request body, so `model` must be `preserve` or `upstream`. With `upstream`, the public model id maps to the upstream deployment name.
+- `response_model: public` matters here because the upstream reports the underlying model name in `model`, not the deployment name it was called with.
+- Usage accounting reads the flat `usage.input_tokens` and `usage.output_tokens` fields. Decision models have no cache tiers, so cached-token counters stay at zero.
+- Question and answer bodies are not inspected, validated, or rewritten. Upstream validation errors (HTTP 422) are returned unchanged.
+- Decision models are excluded from the built-in `/chat` page because they return probabilities rather than messages. They still appear in `GET /proxy/models` and `GET /proxy/<profile>/v1/models` with `supported_endpoints: ["/systemone"]`.
+
+Calling it through ghc-api:
+
+```bash
+curl http://127.0.0.1:8313/proxy/example-decision/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{"model":"microsoft-decision-1","state":"...","questions":{...}}'
+```
 
 ## Native Anthropic Messages
 
 The Messages API is passed through without OpenAI translation. Both JSON and Anthropic SSE responses are supported. When `response_model: public` is configured, the top-level model in a JSON response and `message_start.message.model` in a stream are rewritten to the public model id; use `preserve` for byte-equivalent model values.
 
-Incoming client headers are not forwarded. Configure required Anthropic headers such as `anthropic-version`, `anthropic-beta`, and `x-api-key` in the profile/API/model header sections. There is currently no configured-proxy `/v1/messages/count_tokens` route.
+Configure required Anthropic headers such as `anthropic-version`, `anthropic-beta`, and `x-api-key` in the profile/API/model header sections. There is currently no configured-proxy `/v1/messages/count_tokens` route.
 
 ## Client configuration
 

@@ -29,6 +29,7 @@ from ..api_helpers import (
 from ..auth import ANONYMOUS_USER_ID, get_user_registry
 from ..state import state
 from ..webiq import is_configured as webiq_is_configured, tool_definition as webiq_tool_definition
+from ..anysearch import is_configured as anysearch_is_configured, tool_definition as anysearch_tool_definition
 from ..token_usage_reporter import get_token_usage_overview
 from ..token_manager import (
     get_token_file_path,
@@ -68,6 +69,7 @@ def _runtime_config() -> Dict[str, Any]:
         "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
         "save_request_to_file": state.save_request_to_file,
         "log_webiq_requests": state.log_webiq_requests,
+        "log_anysearch_requests": state.log_anysearch_requests,
         "disable_onedrive_access": state.disable_onedrive_access,
         "enable_auth": state.enable_auth,
         "anthropic_responses_compat_enabled": state.anthropic_responses_compat_enabled,
@@ -168,7 +170,8 @@ def chat_page():
         "chat.html",
         webiq_available=webiq_is_configured(state),
         webiq_tool_chat=webiq_tool_definition("chat"),
-        webiq_tool_responses=webiq_tool_definition("responses"),
+        anysearch_available=anysearch_is_configured(state),
+        anysearch_tool_chat=anysearch_tool_definition("chat"),
     )
 
 
@@ -223,6 +226,7 @@ def api_runtime_config_update():
         "auto_remove_encrypted_content_on_parse_error",
         "save_request_to_file",
         "log_webiq_requests",
+        "log_anysearch_requests",
         "disable_onedrive_access",
         "anthropic_responses_compat_enabled",
         "anthropic_responses_wire_profile",
@@ -300,6 +304,9 @@ def api_runtime_config_update():
             if not isinstance(log_webiq, bool):
                 raise ValueError("'log_webiq_requests' must be a boolean")
             state.log_webiq_requests = log_webiq
+        if "log_anysearch_requests" in payload:
+            state.log_anysearch_requests = _validate_bool(
+                payload["log_anysearch_requests"], "log_anysearch_requests")
 
         if "disable_onedrive_access" in payload:
             disable_onedrive = payload["disable_onedrive_access"]

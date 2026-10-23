@@ -77,7 +77,7 @@ By default, the server will start on `http://localhost:8313`.
 - `--ghe-endpoint HOST`: Configure both GHE data-residency endpoints and exit
 - `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
 - `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.26`)
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.29`)
 - `--help`: Show help message
 
 ### Configuration
@@ -188,6 +188,7 @@ responses_pre_header_grace: 0.5 # How long a Responses request waits for upstrea
 
 # Recover from undecryptable encrypted content (disabled by default)
 auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns HTTP 400
+                              # or an SSE error before any model output
                               # because encrypted reasoning or tool output content cannot
                               # be decrypted, clean request.input and retry once.
                               # Lossy; see "Encrypted Content Recovery" below.
@@ -222,14 +223,15 @@ forged signature never reaches `/v1/messages` upstream.
 
 ### Encrypted Content Recovery
 
-Copilot's `/v1/responses` sometimes rejects a conversation with HTTP 400 because encrypted
+Copilot's `/v1/responses` sometimes rejects a conversation with HTTP 400 or an SSE error
+inside an HTTP 200 stream because encrypted
 reasoning blobs (`encrypted_content` on a `reasoning` item) or encrypted tool output can no
 longer be decrypted — typically after a token rotation or a server-side key change. The
 conversation is then permanently stuck: every follow-up turn replays the same history and
 fails again.
 
-Set `auto_remove_encrypted_content_on_parse_error: true` to let ghc-api react to such a 400
-exactly once per request:
+Set `auto_remove_encrypted_content_on_parse_error: true` to let ghc-api recover from either
+form exactly once per request, before any model output has been forwarded:
 
 - Items whose encrypted payload *is* the content (reasoning items, messages) are dropped.
 - Tool output items (`function_call_output`, `custom_tool_call_output`, ...) are **kept** with
@@ -238,6 +240,14 @@ exactly once per request:
 - If a tool *call* itself must be dropped, its paired output is dropped with it.
 - The cleaned request is retried once; the retry does not consume the connection-retry budget,
   and a second identical failure is returned to the client as-is.
+- Streaming recovery reads the diagnostic that can follow `response.failed` with `error: null`.
+  It also handles a standalone `error` — in both the documented flat shape and the nested
+  `error` object the live service sends — or an error inside `response.failed`. It works even
+  when `enable_responses_early_failure_retry` is false or `max_connection_retries` is zero.
+- The two forms can interleave: when a diagnostic-free early failure is replayed and that
+  replay returns the HTTP-form rejection, recovery still runs on it.
+- Explicit invalid-request errors are not retried with the same input. Once text, reasoning,
+  or tool-call output has been forwarded, the stream is never replayed.
 
 The option is **off by default** because it is lossy — the model loses that reasoning/tool
 context — and costs one extra upstream request. Every recovery is counted
@@ -574,7 +584,7 @@ optional user-token auth gate, and logging. It adds nothing to the search itself
 The proxy never searches on a model's behalf. Clients declare the `webiq_search`
 function tool, the model decides whether and what to search, and the client
 executes the tool call against this endpoint; `/chat` does that automatically
-when the Web IQ toggle is on. That tool schema stays narrow (`query`,
+when Web IQ is selected in the Search menu. That tool schema stays narrow (`query`,
 `max_results`) on purpose — it is a prompt surface, not the API — so the client
 is what turns those arguments into a full official request. See
 `scripts/webiq_search_demo.py`.
@@ -585,6 +595,77 @@ added to the shared request cache with a service-specific model name such as
 `webiq_search`, `webiq_videos`, or `webiq_browse`. MCP calls are audited in both
 places with HTTP/MCP method, name, status, duration, session IDs and user ID;
 streaming MCP request and response bodies are never persisted.
+
+### AnySearch
+
+AnySearch is an independent second search provider alongside Web IQ:
+
+- `POST /v1/search` proxies the [native AnySearch Search API](https://www.anysearch.com/docs/api-endpoints/v1-search).
+- `/chat` offers **Off / Native / Web IQ / AnySearch** in its Search selector.
+  Existing Native/Web IQ preferences are migrated automatically. There is no
+  automatic provider fallback or simultaneous search.
+
+Configure it in `config.yaml`, then restart ghc-api:
+
+```yaml
+enable_anysearch: true
+# Choose one: inline anysearch_api_key, OR a private key file.
+anysearch_api_key: ""
+anysearch_api_key_file: "~/.config/ghc-api/secrets/anysearch_api_key"
+anysearch_base_url: "https://api.anysearch.com"
+anysearch_timeout: 30
+log_anysearch_requests: true
+```
+
+The key file contains only the key (a trailing newline is accepted); keep it
+outside the repository with mode `0600`. It is read at startup, not automatically
+created or discovered. A nonempty inline `anysearch_api_key` and a key file cannot
+be configured together. Keys never appear in Chat template data or the runtime
+config API. **A server-held key is required**: missing configuration returns 503,
+never anonymous traffic. No automatic retries, redirects, or key registration.
+
+```bash
+curl -X POST http://localhost:8313/v1/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Python asyncio TaskGroup documentation","max_results":5}'
+```
+
+With `enable_auth: true`, provide your **ghc-api user token**, not the provider
+key, using `Authorization: Bearer <GHC_API_USER_TOKEN>`. Client credentials are
+not forwarded to AnySearch. When auth is disabled, protect the server with an
+appropriate network/reverse-proxy access boundary: callers spend its quota.
+
+Native request bytes and normal responses are preserved, including `tag`,
+`zone`, `language`, `params`, `format`, and future fields. The proxy inserts no
+search defaults. `format: markdown` still returns a JSON envelope; result
+`content` is Markdown. Retry-After and X-Request-ID survive ordinary responses.
+Documented security exceptions:
+
+- Upstream 401/403 become safe 503 errors about the **server's** credentials/access.
+- **Every 402 body is replaced** with a fixed quota error, retaining only safe
+  request-ID metadata. AnySearch may include generated credentials in 402s;
+  originals never reach logs, request caches, exports, or clients.
+- Upstream redirects become safe 502 errors instead of being followed.
+- Timeout is 504; other network failure is 502. No exception details are exposed.
+
+Chat declares `anysearch_search(query, max_results)` as a normal function tool,
+executes the model's calls client-side, and returns results through Chat
+Completions, Responses, or Messages tool results. It does not change native
+upstream `web_search` tools. The UI requests five results and Markdown by default,
+limits result text for model context, marks truncation, and keeps citation URLs.
+Those are client policies, not API defaults. Search failures become safe tool
+outputs; unknown or unselected tools cannot execute.
+
+Requests appear in the shared request browser/statistics as `anysearch_search`
+with zero LLM tokens. Safe daily audit records go to
+`<ghc-api config dir>/anysearch/YYYY-MM-DD.jl`; `log_anysearch_requests` controls
+this dedicated file, not the shared cache. It can be toggled through
+`/api/runtime-config`. Business failures and malformed successes are marked as
+errors even if upstream used HTTP 200; the original HTTP contract is preserved.
+
+A CLI example is in `scripts/anysearch_search_demo.py` (use `GHC_API_TOKEN` for
+optional ghc-api user authentication). See the
+[design and security decision](docs/decisions/ANYSEARCH_SEARCH_API.md) for details.
 
 ### Configured Upstream Proxy
 
