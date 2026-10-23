@@ -432,6 +432,39 @@ class ConfiguredProxyAuthTest(unittest.TestCase):
 
                 self.assertEqual(run.call_count, 1)
 
+    def test_custom_auth_wins_over_dynamic_and_affinity_headers(self):
+        for binding_header, affinity_header in (
+            ("x-vendor-key", "X-Route-Token"),
+            ("X-Upstream-Context", "X-VENDOR-KEY"),
+        ):
+            with self.subTest(binding_header=binding_header, affinity_header=affinity_header):
+                config = __import__("yaml").safe_load(CONFIG)
+                raw = config["proxies"]["demo-profile"]
+                raw["auth"] = {
+                    "type": "header_command", "header": "X-Vendor-Key",
+                    "command": ["credential-helper"],
+                }
+                raw["affinity"]["request_header"] = affinity_header
+                raw["apis"]["responses"]["header_bindings"] = [{
+                    "client_name": "X-Client-Context", "upstream_name": binding_header,
+                    "value_type": "uuid_v4",
+                }]
+                profile = parse_proxy_config(config).profiles["demo-profile"]
+                api, model, model_api = profile.resolve("responses", "demo-model")
+                session_id = str(uuid.uuid4())
+                completed = mock.Mock(returncode=0, stdout="command-credential\n", stderr="")
+                with mock.patch("ghc_api.proxy.auth.subprocess.run", return_value=completed):
+                    headers = ProxyRuntime()._build_headers(
+                        profile, api, model, model_api, ProxyAuthProvider(profile.auth),
+                        "route-token", {binding_header: session_id},
+                    )
+
+                self.assertEqual(headers["X-Vendor-Key"], "command-credential")
+                self.assertEqual([name for name in headers if name.lower() == "x-vendor-key"], ["X-Vendor-Key"])
+                for name, value in ((binding_header, session_id), (affinity_header, "route-token")):
+                    if name.lower() != "x-vendor-key":
+                        self.assertEqual(headers[name], value)
+
     def test_command_token_is_refreshed_once_after_upstream_401(self):
         for auth_type, header, prefix in (
             ("bearer_command", "Authorization", "Bearer "),

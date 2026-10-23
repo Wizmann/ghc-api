@@ -121,17 +121,16 @@ class ProxyRuntime:
             profile.headers, api.headers, model.headers, model_api.headers,
             overridden_names=overridden_names,
         )
-        if token:
-            value = token if profile.auth.type == "header_command" else f"Bearer {token}"
-            _set_header(headers, profile.auth.header, value)
         for name, value in dynamic_headers.items():
             # Dynamic values win even when a static header uses different casing.
             _set_header(headers, name, value)
         if profile.affinity.enabled and affinity_token:
-            # Affinity is applied last so it always wins: config validation
-            # rejects a binding that reuses this name, but a last-known-good
-            # config loaded before that rule must not lose the token either.
+            # Affinity takes precedence over dynamic bindings.
             _set_header(headers, profile.affinity.request_header, affinity_token)
+        if token:
+            # Credentials always win, including over routing headers.
+            value = token if profile.auth.type == "header_command" else f"Bearer {token}"
+            _set_header(headers, profile.auth.header, value)
         return headers
 
     def _capture_affinity(

@@ -169,11 +169,13 @@ Outbound headers are merged in this order:
 3. API `headers`
 4. Model `headers`
 5. Model API `headers`
-6. Upstream authentication
-7. Dynamic header bindings
-8. Affinity header
+6. Dynamic header bindings
+7. Affinity header
+8. Upstream authentication
 
-Later values override earlier values, case-insensitively for steps 6–8. Empty string values are preserved. Static headers replaced by upstream authentication or dynamic bindings do not require their `${ENV_VAR}` placeholders to be set.
+Later values override earlier values, case-insensitively for steps 6–8. Authentication is applied last: a binding or affinity header with the same name cannot replace the credential. Use distinct names if the upstream needs both authentication and routing values.
+
+Empty string values are preserved. Static headers replaced by upstream authentication or dynamic bindings do not require their `${ENV_VAR}` placeholders to be set.
 
 Header values support `${ENV_VAR}` interpolation:
 
