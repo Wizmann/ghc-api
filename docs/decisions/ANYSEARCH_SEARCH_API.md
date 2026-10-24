@@ -1,128 +1,163 @@
-# AnySearch as a second search provider
+# AnySearch REST APIs and Chat tools
 
-## Decision
+## Decision and scope
 
-Add AnySearch alongside Web IQ, not underneath it. Expose native
-`POST /v1/search` and provide `anysearch_search` as a client-executed function
-tool in the built-in Chat page. Existing Web IQ routes and tool names remain
-unchanged. The LLM proxy does not secretly execute searches or inject results
-into prompts. `ghc_api/web_search.py` (the older Anthropic rejection fallback)
-is unrelated and is not changed by this integration.
+AnySearch is independent of Web IQ. Proxy all three documented REST endpoints
+and expose matching client-executed tools when AnySearch is selected in Chat:
 
-References:
+| Method/path | Chat tool | Meaning |
+| --- | --- | --- |
+| POST /v1/search | anysearch_search | Ranked search results |
+| POST /v1/extract | anysearch_extract | Clean content from a public HTTP(S) URL |
+| GET /v1/sub-domains | anysearch_sub_domains | Search capability definitions |
 
-- https://www.anysearch.com/docs/api-endpoints/v1-search
+The original integration only implemented Search. This extension fills the two
+missing REST contracts and lets the Chat tool loop compose all three. Existing
+Web IQ routes, tool names, and native model-side web_search behavior are unchanged.
+The LLM proxy never secretly executes searches or injects results into prompts.
+`ghc_api/web_search.py`, the older Anthropic rejection fallback, is unrelated.
+
+Authoritative contracts (checked together, rather than just the Search page):
+
 - https://www.anysearch.com/docs/api-endpoints
+- https://www.anysearch.com/docs/api-endpoints/v1-search
+- https://www.anysearch.com/docs/api-endpoints/v1-extract
+- https://www.anysearch.com/docs/api-endpoints/v1-sub-domains
 - https://www.anysearch.com/docs/auth
 
-## Native contract and transport
+## Native contracts
 
-- Forward request bytes, including unknown/additive parameters. Do not validate
-  search fields, clamp counts, insert defaults, or rewrite `tag`, `zone`,
-  `language`, `params`, or `format` at the proxy layer.
-- Preserve a missing/wrong Content-Type so upstream owns the 415 decision.
-- Preserve ordinary upstream status, body, and end-to-end headers, including
-  Retry-After and X-Request-ID. Reuse the existing Web IQ HTTP header filter.
-- `format: markdown` changes result content, not the outer JSON envelope.
-- Require the server-held key; no anonymous mode, auto-registration, retries,
-  provider fallback, fusion, or upstream redirect following.
-- Server config alone selects the base URL. Clients cannot route credentials
-  to arbitrary paths/hosts. Support a base path for private reverse proxies.
-- Disabled/unconfigured is 503; timeout is 504; other transport failure is 502.
-  Network exception strings are not returned or logged.
+Search forwards bytes, including unknown/additive parameters. The proxy does
+not validate search fields, clamp counts, insert defaults, or rewrite tag,
+zone, language, params, or format. Markdown changes content, not the outer JSON.
 
-## Authentication and configuration
+Extract's upstream contract is strict: exactly one UTF-8 JSON object containing
+one nonempty url string, at most 16 KiB, no unknown or duplicate fields, a public
+absolute HTTP(S) URL, application/json with no charset or UTF-8, and no content
+encoding or identity. The proxy preserves bytes, Content-Type (including its
+absence), and Content-Encoding so **upstream**, not an approximate local parser,
+validates them. Extraction is performed by AnySearch: ghc-api must never issue
+an HTTP request directly to the caller's url. Ordinary errors including 422 and
+error_code remain intact. The project-wide JSON nesting safety guard still applies.
 
-`POST /v1/search` is in `PROTECTED_PATHS` and uses ghc-api's existing optional
-user-token gate. Its Authorization header is never forwarded. AnySearch sees
-only `Authorization: Bearer <server key>`.
+**Sub-domains is not DNS enumeration.** Despite some marketing wording, the API
+returns capability tags and parameter definitions for search categories such as
+code and finance. The request is `?domain=code&domain=finance`, not `domains`, a
+comma-separated string, or a website hostname. Keep repeated query parameters
+and unknown fields; do not deduplicate or invent aliases locally. Upstream owns
+missing-domain errors and unknown-domain empty successes. Definitions include
+full tags such as code.doc and named params with description, required, and
+sort_order. This operation consumes no search quota and is not search usage.
 
-Settings: `enable_anysearch`, `anysearch_api_key`, `anysearch_api_key_file`,
-`anysearch_base_url`, `anysearch_timeout`, `log_anysearch_requests`.
-An inline key and a key file are mutually exclusive. Key files are read at
-startup (use an absolute path or `~`), not automatically discovered or created.
-The key must be one nonempty ASCII token to enable requests. Missing keys do
-not cause anonymous traffic. Invalid configuration aborts startup with messages
-that never interpolate keys or key-file contents. No key is exposed through
-Chat template data or the runtime config API.
+## Transport, authentication, and configuration
 
-As with the other quota-spending endpoints, disable user auth only behind an
-appropriate access boundary. Dashboard/admin endpoints still require external
-protection; this change does not alter the application's auth architecture.
+Only the three fixed paths and their methods are reachable through the server
+key. All require enable_anysearch and a nonempty server key. All are protected
+by ghc-api's optional user-token gate, including the quota-free catalog endpoint.
+Client Authorization/x-api-key headers are never forwarded; upstream sees only
+the server's Bearer key. The catalog's raw query string retains repeats/encoding,
+except client api_key fields (including percent-encoded names) are removed before
+forwarding and auditing. Do not turn the proxy's query-string auth into a leak
+to the provider or the shared request cache.
+
+Configuration: enable_anysearch, anysearch_api_key OR anysearch_api_key_file,
+anysearch_base_url, anysearch_timeout (30s), anysearch_extract_timeout (60s), and
+log_anysearch_requests. The existing enable/key/base settings cover all three
+services; existing installations need no new setting merely to enable them.
+Base paths support trusted private reverse proxies; arbitrary caller URLs do not.
+Key files are read at startup, not discovered/created. They should be outside the
+repository with mode 0600. No key goes into Chat template data or runtime-config
+responses. Invalid settings fail startup without printing secret values.
+
+There is no anonymous mode, auto-registration, automatic retry, provider fallback,
+result fusion, or upstream redirect following. Missing configuration is 503;
+timeout is 504; other transport failure is 502. Exceptions are not interpolated
+into client errors or routine logs. Normal responses retain the native body,
+status, Retry-After and X-Request-ID, using the existing HTTP header filter.
 
 ## Sensitive-response boundary
 
-AnySearch documents that anonymous HTTP 402 may contain a generated username,
-password, and API key. We never use anonymous access, but still treat **every
-402** as sensitive, independent of its body or Content-Type.
+Search AND Extract may return generated credentials in anonymous HTTP 402
+messages. Even though this proxy only uses keys, **every 402 on every endpoint**
+is sensitive regardless of content type, parseability, or regex matches.
 
-`ghc_api/anysearch.py` consumes and closes the upstream response. Before any
-response leaves that module:
+The transport consumes/closes the upstream response and returns only a safe
+SearchResponse (historical class name retained for compatibility):
 
-- 402 becomes a fixed quota error with status 402.
-- 401/403 become a fixed server-credential/access error with status 503.
-- Redirects become a fixed 502 without forwarding Location.
-- These responses contain only a safe error envelope and fixed response
-  headers. Only a validated UUID v4 upstream request ID may be preserved;
-  otherwise use the locally generated ID. They include Cache-Control: no-store.
+- 402: fixed quota error, HTTP 402.
+- 401/403: fixed server-credential/access error, HTTP 503.
+- Redirect: fixed HTTP 502, no Location forwarded.
+- These responses have only safe fixed headers/envelopes and Cache-Control:
+  no-store. Only a validated UUID v4 upstream request ID survives; otherwise use
+  the local UUID. Preserve original HTTP status as safe audit metadata.
 
-The route receives only a `SearchResponse`, never the original response or
-its history. No raw sensitive body/headers go to Flask, stdout, audit files,
-request cache, exports, browser history, or later model requests. This holds
-for malformed and non-JSON 402 responses too; it is not regex-based redaction.
-The upstream HTTP status remains available as safe audit metadata.
+Raw sensitive bytes/headers never enter Flask, stdout, audit files, request cache,
+exports, browser history, or later model requests. The browser additionally does
+not read non-success response bodies, even if a misconfigured intermediary fails
+to sanitize them. No generated credentials are saved or used to resubmit a call.
 
 ## Chat tool layer
 
-One selector: Off / Native / Web IQ / AnySearch. Preserve the old Native
-preference/default and Web IQ precedence when migrating localStorage. A
-provider becoming unavailable never selects another provider automatically.
-Native retains its existing Copilot GPT Responses restrictions; function tools
-work with the existing Chat Completions, Responses, and Messages loops.
+One visible selector: Off / Native / Web IQ / AnySearch. Existing localStorage
+preferences are migrated; unavailability never chooses another provider silently.
+Native retains its Copilot GPT Responses restrictions. A provider can expose
+multiple function tools through the common registry. Only a tool actually declared
+for the turn may execute, even if the selection changes during an in-flight call.
 
-A small client-side registry supplies schemas and executors. Only a tool
-actually declared for that turn can execute, even if another provider is
-configured or the selector changes during the turn. Keep round limits,
-cancellation, call-ID correlation, result history, and source deduplication.
-A tool call in the forced-answer round is an error, not another search.
+AnySearch declares:
 
-The AnySearch schema deliberately exposes only `query` and `max_results`.
-The UI asks for five results by default and Markdown content; it does not
-invent capability tags. Advanced fields remain fully available on the HTTP API.
+- anysearch_search: query and max_results plus optional tag, params, zone,
+  language, format. Usually use query alone. Specialized searches should first
+  discover a valid tag and its required params, not invent values.
+- anysearch_extract: url only. Fetching remains upstream, never in the browser.
+- anysearch_sub_domains: domain as a nonempty string array, encoded as repeated
+  query parameters. Its description explicitly rules out DNS interpretation.
 
-Tool success requires HTTP success, `code == 0`, and a well-formed results list.
-Empty results are valid; bad JSON/business errors are not empty successes.
-The UI uses content or snippet, clips content to 3000 characters and snippets
-to 1000, and marks truncation. This is a model-context policy, not a native API
-transformation. Results are labeled untrusted and include citation URLs.
-Failures return safe tool outputs, not failed chat turns. Cancellation propagates.
+A typical sequence is capability lookup -> tagged search -> extraction -> answer.
+All tools share the existing three-round budget and the final forced-answer round.
+Multiple calls can occur in a round; the budget is not a hard request-count cap.
+Keep cancellation, call-ID correlation, history, and citation deduplication across
+Chat Completions, Responses, and Messages. Reject undeclared tools and tool calls
+in the forced-answer round. Search/extraction failures return safe tool results,
+not an automatic switch to another provider or a failed chat turn.
 
-## Observability
+Success requires HTTP success, code 0, and the endpoint's expected data shape.
+Empty search/catalog arrays are valid; malformed bodies are not empty successes.
+The UI defaults to five search results/Markdown; search content is clipped to
+3000 characters, snippets to 1000, and extracted content to 12000, with truncation
+markers. Native HTTP responses are never trimmed by these context policies.
+Web content is explicitly untrusted. Extraction contributes its URL to citations;
+capability metadata does not manufacture web citations.
 
-Daily safe audit: `<config_dir>/anysearch/YYYY-MM-DD.jl`, controlled independently
-by `log_anysearch_requests`. Like Web IQ, the shared request cache remains active
-when the dedicated file log is disabled and obeys its existing body-size limits.
-The dedicated audit is untruncated for normal responses, never for sensitive ones.
+## Observability and testing
 
-Model label: `anysearch_search`; LLM token counts remain zero. Record local and
-upstream IDs, user, HTTP and business status, duration, and result count. A
-malformed or business-failed HTTP 200 keeps the native HTTP status but is marked
-as an error in the audit/cache and increments `anysearch.search_error`, not
-`anysearch.search`.
+All three operations use `<config_dir>/anysearch/YYYY-MM-DD.jl`, independently
+controlled by log_anysearch_requests. Disabling this dedicated log does not disable
+the shared request cache, whose existing body-size limits apply. Normal dedicated
+audit records are untruncated; sensitive errors are always sanitized first.
 
-## Validation and exclusions
+Use distinct model labels/counters: anysearch_search / anysearch.search,
+anysearch_extract / anysearch.extract, anysearch_sub_domains / anysearch.sub_domains.
+LLM tokens stay zero. Catalog records have uses_search_quota false and never
+increment search counters; all API traffic still appears in the request browser.
+Record safe query parameters, extraction URL, local/upstream IDs, status, business
+code, duration, and applicable result count. Business failures/malformed HTTP 200s
+retain the wire status but are marked errors in audit/cache and counters.
 
-Mock tests cover passthrough, key-only behavior, auth separation, 402 bodies
-across all sinks, header/ID handling, error classification, config loading,
-and business failures. Node-based tests execute real Chat code with fake HTTP
-and SSE for all three protocols, including history, rejection of undeclared
-tools, round limits, cancellation, and old setting migration. Existing Web IQ
-regression tests remain in place.
+Tests cover all native paths/methods, query repeats and credential stripping,
+Extract's strict-body passthrough, no local fetch, auth separation, 402 across all
+sinks, status/header handling, failures, configuration, and no retries. Browser-free
+JS tests compose all three tools in each protocol, including errors, cancellation,
+round limits, and unselected-tool rejection. Real-browser layout tests guard the
+selector's visibility. Existing Web IQ regressions remain in place. Live HTTP
+smoke checks, when explicitly run, are separate from CI; they do not prove live
+model reasoning/tool choice. The demo CLI covers all three native endpoints.
 
-Real integration was checked with three authenticated requests: ordinary JSON,
-Chinese language/region, and `code.doc` with params/Markdown. All returned HTTP
-200 and valid results. These are explicit smoke checks, never part of CI.
-Live model reasoning/tool choice is not tested by these HTTP smoke checks.
+The extension's live check made exactly three requests: a code/finance catalog
+lookup (2 domains, 8 capabilities), a one-result search, and extraction of
+https://example.com/ (156 characters). All returned HTTP 200 with valid native
+data shapes. No retries, model calls, service restarts, or runtime config changes
+were made. The earlier Search-only integration was also tested independently.
 
-Extract, MCP, automatic retries/fallback, result fusion, and anonymous credential
-management are out of scope.
+AnySearch MCP proxying, DNS subdomain enumeration, anonymous credential management,
+automatic retries/fallback and fusion are not implemented by this change.

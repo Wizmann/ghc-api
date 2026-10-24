@@ -29,7 +29,7 @@ from ..api_helpers import (
 from ..auth import ANONYMOUS_USER_ID, get_user_registry
 from ..state import state
 from ..webiq import is_configured as webiq_is_configured, tool_definition as webiq_tool_definition
-from ..anysearch import is_configured as anysearch_is_configured, tool_definition as anysearch_tool_definition
+from ..anysearch import is_configured as anysearch_is_configured, tool_definitions as anysearch_tool_definitions
 from ..token_usage_reporter import get_token_usage_overview
 from ..token_manager import (
     get_token_file_path,
@@ -171,7 +171,7 @@ def chat_page():
         webiq_available=webiq_is_configured(state),
         webiq_tool_chat=webiq_tool_definition("chat"),
         anysearch_available=anysearch_is_configured(state),
-        anysearch_tool_chat=anysearch_tool_definition("chat"),
+        anysearch_tools_chat=anysearch_tool_definitions("chat"),
     )
 
 

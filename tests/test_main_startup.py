@@ -154,16 +154,18 @@ def test_anysearch_config_loads_private_key_without_exposing_it(startup_env, cap
         "debug: true\nenable_anysearch: true\n"
         f"anysearch_api_key_file: {key_path}\n"
         "anysearch_base_url: http://127.0.0.1:9000/search-prefix\n"
-        "anysearch_timeout: 60\nlog_anysearch_requests: false\n",
+        "anysearch_timeout: 60\nanysearch_extract_timeout: 120\nlog_anysearch_requests: false\n",
         encoding="utf-8",
     )
     main_module.main()
     assert state.enable_anysearch is True
     assert state.anysearch_api_key == "ANYSEARCH-STARTUP-SECRET"
     assert state.anysearch_timeout == 60
+    assert state.anysearch_extract_timeout == 120
     assert state.log_anysearch_requests is False
     captured = capsys.readouterr()
-    assert "AnySearch API:" in captured.out
+    for path in ("/v1/search", "/v1/extract", "/v1/sub-domains"):
+        assert f"AnySearch API: http://localhost:8313{path}" in captured.out
     assert "ANYSEARCH-STARTUP-SECRET" not in captured.out + captured.err
 
 

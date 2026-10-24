@@ -134,6 +134,7 @@ class State:
         self.anysearch_api_key: str = ""
         self.anysearch_base_url: str = "https://api.anysearch.com"
         self.anysearch_timeout: int = 30
+        self.anysearch_extract_timeout: int = 60
         self.log_anysearch_requests: bool = True
 
         # User authentication settings
