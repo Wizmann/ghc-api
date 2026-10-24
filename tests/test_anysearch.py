@@ -281,11 +281,14 @@ def test_search_schema_supports_discovered_capability_parameters():
     chat = anysearch.tool_definition()
     responses = anysearch.tool_definition("responses")
     assert chat["function"]["name"] == responses["name"] == "anysearch_search"
+    assert chat["function"]["strict"] is False
     assert set(responses["parameters"]["properties"]) == {
         "query", "max_results", "tag", "params", "zone", "language", "format",
     }
     assert responses["parameters"]["required"] == ["query"]
+    assert responses["parameters"]["properties"]["params"].get("additionalProperties", True) is True
     tools = anysearch.tool_definitions("responses")
+    assert all(tool["strict"] is False for tool in tools)
     assert [t["name"] for t in tools] == ["anysearch_search", "anysearch_extract", "anysearch_sub_domains"]
     assert tools[1]["parameters"]["required"] == ["url"]
     assert tools[2]["parameters"]["properties"]["domain"]["type"] == "array"

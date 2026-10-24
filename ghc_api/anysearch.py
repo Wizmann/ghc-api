@@ -81,7 +81,8 @@ TOOL_SCHEMAS = {
 
 def tool_definition(api_style: str = "chat", name: str = TOOL_NAME) -> dict:
     description, parameters = TOOL_SCHEMAS[name]
-    function = {"name": name, "description": description, "parameters": parameters}
+    # Keep optional fields and runtime-discovered params non-strict in Responses.
+    function = {"name": name, "description": description, "parameters": parameters, "strict": False}
     if api_style == "responses":
         return {"type": "function", **function}
     return {"type": "function", "function": function}

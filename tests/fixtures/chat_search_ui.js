@@ -276,6 +276,12 @@ async function turn(style) {
         assert.equal(calls.filter(c => c.url === '/v1/extract').length, 1);
         const finalChoice = calls.at(-1).body.tool_choice;
         assert.equal(finalChoice.type || finalChoice, 'none');
+        // Inspect outgoing schemas too, not only the synthetic SSE tool calls.
+        for (const tool of calls.flatMap(c => c.body?.tools || [])) {
+            const fn = tool.function || tool;
+            if (style === 'messages') assert.equal(Object.hasOwn(fn, 'strict'), false);
+            else assert.equal(fn.strict, false);
+        }
         for (const name of ['anysearch_extract', 'anysearch_sub_domains']) {
             reset();
             const args = name === 'anysearch_extract' ? {url:'https://example.com'} : {domain:['code']};
