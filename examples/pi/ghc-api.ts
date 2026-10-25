@@ -53,6 +53,7 @@ export default async function (pi: ExtensionAPI) {
       id: model.id,
       name: model.display_name ?? model.id,
       api,
+      baseUrl: api === "anthropic-messages" ? baseUrl.replace(/\/v1$/, "") : baseUrl,
       contextWindow,
       maxTokens,
       input: input.length ? input : ["text" as const],
