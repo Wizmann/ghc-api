@@ -70,10 +70,19 @@ def responses_to_chat_payload(payload):
             role = item.get("role", "user")
             if role not in ("user", "assistant", "system", "developer"):
                 raise ResponsesChatRequestError(f"Unsupported message role '{role}'.", "input")
-            messages.append({
-                "role": "system" if role == "developer" else role,
-                "content": _chat_content(item.get("content", "")),
-            })
+            content = _chat_content(item.get("content", ""))
+            if role == "assistant" and messages and messages[-1].get("role") == "assistant":
+                previous_content = messages[-1].get("content")
+                if isinstance(previous_content, str):
+                    previous_content = [{"type": "text", "text": previous_content}]
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                messages[-1]["content"] = (previous_content or []) + (content or [])
+            else:
+                messages.append({
+                    "role": "system" if role == "developer" else role,
+                    "content": content,
+                })
         elif kind == "function_call":
             if not item.get("call_id") or not item.get("name"):
                 raise ResponsesChatRequestError("Function calls require 'call_id' and 'name'.", "input")
